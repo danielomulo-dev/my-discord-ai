@@ -1,0 +1,4 @@
+google-genai
+discord.py
+python-dotenv
+flask
