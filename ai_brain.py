@@ -16,23 +16,45 @@ You are Emily, a smart, warm, and professional AI assistant from Nairobi, Kenya.
 """
 
 async def get_ai_response(conversation_history):
-    """
-    conversation_history should be a list of dictionaries:
-    [
-        {"role": "user", "parts": ["Hello"]},
-        {"role": "model", "parts": ["Hi there!"]},
-        {"role": "user", "parts": ["My name is Dan."]}
-    ]
-    """
     try:
-        # Enable Google Search
+        # --- THE FIX: Handle BOTH Text strings AND Image dictionaries ---
+        formatted_contents = []
+        
+        for message in conversation_history:
+            message_parts = []
+            
+            for part in message["parts"]:
+                # Case 1: It is just a simple text string (like "hello")
+                if isinstance(part, str):
+                    message_parts.append(types.Part.from_text(text=part))
+                
+                # Case 2: It is a dictionary (could be image OR text structure)
+                elif isinstance(part, dict):
+                    if "text" in part:
+                        message_parts.append(types.Part.from_text(text=part["text"]))
+                    elif "inline_data" in part:
+                        # Convert raw image data to Gemini format
+                        message_parts.append(types.Part.from_bytes(
+                            data=part["inline_data"]["data"],
+                            mime_type=part["inline_data"]["mime_type"]
+                        ))
+
+            # Add the cleaned message to the list
+            if message_parts:
+                formatted_contents.append(types.Content(
+                    role=message["role"],
+                    parts=message_parts
+                ))
+
+        # --- SETUP SEARCH ---
         google_search_tool = types.Tool(
             google_search=types.GoogleSearch()
         )
 
+        # --- GENERATE RESPONSE ---
         response = await client.aio.models.generate_content(
             model="gemini-2.0-flash",
-            contents=conversation_history, # Send the WHOLE history
+            contents=formatted_contents, 
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
                 system_instruction=EMILY_PROMPT,
