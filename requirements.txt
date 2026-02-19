@@ -2,3 +2,9 @@ google-genai
 discord.py
 python-dotenv
 flask
+beautifulsoup4
+requests
+youtube-transcript-api
+
+
+
