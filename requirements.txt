@@ -5,6 +5,8 @@ flask
 beautifulsoup4
 requests
 youtube-transcript-api
+pymongo
+certifi
 
 
 
