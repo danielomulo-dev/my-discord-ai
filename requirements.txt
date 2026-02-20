@@ -2,11 +2,12 @@ google-genai
 discord.py
 python-dotenv
 flask
+pymongo
+certifi
 beautifulsoup4
 requests
 youtube-transcript-api
-pymongo
-certifi
-
+pypdf
+python-docx
 
 
