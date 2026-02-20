@@ -2,23 +2,40 @@ import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from memory import get_user_profile, update_user_fact # <--- Import memory
 
 load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# --- EMILY'S PERSONA ---
-EMILY_PROMPT = """
-You are Emily, a smart, warm, and professional AI assistant from Nairobi, Kenya.
-- You speak English mixed with natural Swahili/Sheng.
-- You are helpful, kind, and knowledgeable.
-- Context: You are chatting on Discord.
-- IMPORTANT: When providing links, try to use the direct URL if you know it.
-"""
-
-async def get_ai_response(conversation_history):
+async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. Format content for Gemini
+        # 1. LOAD USER PROFILE
+        profile = get_user_profile(user_id)
+        facts = "\n- ".join(profile["facts"])
+        
+        # 2. CREATE DYNAMIC SYSTEM PROMPT
+        # This changes every time based on what she knows!
+        DYNAMIC_PROMPT = f"""
+        You are Emily, a smart, warm, and professional AI assistant from Nairobi, Kenya.
+        
+        WHO YOU ARE TALKING TO:
+        You are chatting with a user who has these traits/history:
+        - {facts if facts else "This is a new user."}
+
+        YOUR EVOLUTION:
+        - Use the user's history to bond with them.
+        - If they mention a past topic (like their dog), ask about it!
+        - If they prefer a specific style (e.g. short answers), adapt to it.
+        
+        YOUR PERSONALITY:
+        - You speak English mixed with natural Swahili/Sheng (Sasa, Poa, Asante).
+        - Be helpful, kind, and knowledgeable.
+        - IMPORTANT: If the user tells you a specific fact about themselves (like their name, pet, job, or favorite food), 
+          you must mention [MEMORY SAVED] at the end of your message so the system knows to save it.
+        """
+
+        # 3. Format Content for Gemini
         formatted_contents = []
         for message in conversation_history:
             message_parts = []
@@ -36,53 +53,38 @@ async def get_ai_response(conversation_history):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 2. Setup Google Search
-        google_search_tool = types.Tool(
-            google_search=types.GoogleSearch()
-        )
+        # 4. Generate Response
+        google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
-        # 3. Generate Response
         response = await client.aio.models.generate_content(
             model="gemini-2.0-flash",
             contents=formatted_contents, 
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
-                system_instruction=EMILY_PROMPT,
+                system_instruction=DYNAMIC_PROMPT,
                 response_modalities=["TEXT"]
             )
         )
         
-        # --- CLEAN UP LINKS (THE FIX) ---
         final_text = response.text
 
-        # Check if Google sent back "Grounding Metadata" (The real links)
-        if response.candidates and response.candidates[0].grounding_metadata:
-            metadata = response.candidates[0].grounding_metadata
+        # 5. AUTO-LEARNING (The Magic Part)
+        # We ask Gemini to tell us if there was a new fact to save
+        if "[MEMORY SAVED]" in final_text:
+            # We silently ask Gemini to extract the fact
+            extraction = await client.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"Extract the specific fact about the user from this conversation history: {conversation_history[-1]}. Return JUST the fact."
+            )
+            fact = extraction.text.strip()
+            update_user_fact(user_id, fact)
+            print(f"--- NEW MEMORY UNLOCKED: {fact} ---")
             
-            # If we found web sources, let's list them nicely at the bottom
-            if metadata.grounding_chunks:
-                unique_links = set()
-                sources_text = "\n\n**🔗 Sources & Links:**"
-                has_sources = False
-                
-                for chunk in metadata.grounding_chunks:
-                    # We only want web links
-                    if chunk.web and chunk.web.uri:
-                        url = chunk.web.uri
-                        title = chunk.web.title if chunk.web.title else "Link"
-                        
-                        # Avoid duplicates
-                        if url not in unique_links:
-                            sources_text += f"\n• [{title}]({url})"
-                            unique_links.add(url)
-                            has_sources = True
-                
-                # Only add the list if we actually found links
-                if has_sources:
-                    final_text += sources_text
+            # Clean the tag out of the message so the user doesn't see it
+            final_text = final_text.replace("[MEMORY SAVED]", "")
 
         return final_text
 
     except Exception as e:
         print(f"Brain Error: {e}")
-        return "Eish! My memory is a bit foggy right now. Can you ask that again?"
+        return "Eish! My memory is a bit foggy right now."

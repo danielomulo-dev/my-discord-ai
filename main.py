@@ -77,7 +77,7 @@ async def on_message(message):
 
         # 4. Generate Response
         async with message.channel.typing():
-            response_text = await get_ai_response(user_memory[user_id])
+            response_text = await get_ai_response(user_memory[user_id], user_id)
             
             user_memory[user_id].append({
                 "role": "model",
