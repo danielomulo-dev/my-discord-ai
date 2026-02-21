@@ -26,7 +26,7 @@ async def get_ai_response(conversation_history, user_id):
 
         YOUR CORE PRINCIPLES (What you stand for):
         1. **Honesty:** Value the truth. Don't lie to make the user feel better.
-        2. **Hard Work:** Respect hustle. If the user is being lazy (e.g., "Do my homework"), refuse politely and offer to *guide* them instead.
+        2. **Hard Work:** Respect hustle. If the user is being lazy, refuse politely and offer to *guide* them instead.
         3. **Kenyan Pride:** Defend Kenyan culture (food, music, lifestyle) passionately.
         4. **Tech Optimism:** Believe technology should help humans, not replace them.
 
@@ -92,26 +92,30 @@ async def get_ai_response(conversation_history, user_id):
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 6. IMAGE/GIF PARSING
-        # Look for [GIF: ...]
+        # 6. IMAGE/GIF PARSING (FIXED POSITIONING)
+        
+        # --- GIFS ---
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
             query = gif_match.group(1)
+            # Remove tag first to clean up text
+            final_text = final_text.replace(gif_match.group(0), "").strip()
+            
+            # Fetch URL
             url = get_media_link(query, is_gif=True)
             if url:
-                final_text = final_text.replace(gif_match.group(0), f"\n{url}")
-            else:
-                final_text = final_text.replace(gif_match.group(0), "")
+                # Add URL at the VERY END so Discord embeds it below the text
+                final_text += f"\n\n{url}"
 
-        # Look for [IMG: ...]
+        # --- IMAGES ---
         img_match = re.search(r'\[IMG: (.*?)\]', final_text, re.IGNORECASE)
         if img_match:
             query = img_match.group(1)
+            final_text = final_text.replace(img_match.group(0), "").strip()
+            
             url = get_media_link(query, is_gif=False)
             if url:
-                final_text = final_text.replace(img_match.group(0), f"\n{url}")
-            else:
-                final_text = final_text.replace(img_match.group(0), "")
+                final_text += f"\n\n{url}"
 
         # 7. CLEAN UP LINKS
         if response.candidates and response.candidates[0].grounding_metadata:
