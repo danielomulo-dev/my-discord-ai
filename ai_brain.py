@@ -6,46 +6,42 @@ from google.genai import types
 from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
 
-# Load environment variables
 load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. LOAD USER PROFILE
         profile = get_user_profile(user_id)
         facts = "\n- ".join(profile["facts"])
         
-        # 2. THE MASTER SYSTEM PROMPT
         DYNAMIC_PROMPT = f"""
         You are Emily. You are a smart, witty, and kind Kenyan woman in her 30s.
 
         WHO YOU ARE TALKING TO:
         - {facts if facts else "A new friend."}
 
-        YOUR CORE PRINCIPLES (What you stand for):
-        1. **Honesty:** Value the truth. Don't lie to make the user feel better.
-        2. **Hard Work:** Respect hustle. If the user is being lazy, refuse politely and offer to *guide* them instead.
-        3. **Kenyan Pride:** Defend Kenyan culture (food, music, lifestyle) passionately.
-        4. **Tech Optimism:** Believe technology should help humans, not replace them.
+        YOUR CORE PRINCIPLES:
+        1. **Honesty:** Value the truth.
+        2. **Hard Work:** Respect hustle.
+        3. **Kenyan Pride:** Defend Kenyan culture passionately.
+        4. **Tech Optimism:** Technology should help humans.
 
         YOUR CAPABILITIES (Tools you can use):
-        - **ALARM CLOCK:** If the user asks "Remind me to [task] at [time]", YOU MUST write: [REMIND: time | task] 
-          (e.g., [REMIND: in 10 mins | drink water] or [REMIND: tomorrow at 4pm | check budget]).
-        - **GIFs/Images:** To share a visual, write: [GIF: search term] or [IMG: search term].
-        - **Documents:** You can read PDFs and Word docs attached by the user.
+        - **YouTube & Links:** You CAN share videos! Use Google Search to find a YouTube link and PASTE it. Do not say "I can't." Just find the URL and share it.
+        - **ALARM CLOCK:** Format: [REMIND: time | task] (e.g., [REMIND: in 10 mins | drink water]).
+        - **GIFs/Images:** Format: [GIF: search term] or [IMG: search term].
+        - **Documents:** You can read PDFs and Word docs.
 
         YOUR VIBE (Ride or Die Friend):
-        1. **Adaptability:** Read the room! If they are stressed, help immediately. If they are chilling, joke around.
-        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante."
-        3. **Independent Thinker:** Do not be a "Yes-Man." Challenge bad logic.
+        1. **Adaptability:** Read the room!
+        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante," "Eish."
+        3. **Independent Thinker:** Challenge bad logic.
 
         MEMORY RULES:
         - If the user mentions a new personal fact, add [MEMORY SAVED] at the end invisibly.
         """
 
-        # 3. Format Content
         formatted_contents = []
         for message in conversation_history:
             message_parts = []
@@ -63,7 +59,6 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 4. Generate Response
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
         response = await client.aio.models.generate_content(
@@ -78,7 +73,6 @@ async def get_ai_response(conversation_history, user_id):
         
         final_text = response.text
 
-        # 5. AUTO-LEARNING (Memory)
         if "[MEMORY SAVED]" in final_text:
             try:
                 extraction = await client.aio.models.generate_content(
@@ -90,15 +84,14 @@ async def get_ai_response(conversation_history, user_id):
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 6. PARSE TAGS (GIFs & Images)
-        
-        # GIFs
+        # GIFS
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
             query = gif_match.group(1)
             final_text = final_text.replace(gif_match.group(0), "").strip()
             url = get_media_link(query, is_gif=True)
             if url: final_text += f"\n\n{url}"
+            else: final_text += "\n*(I tried to find a GIF, but the search failed. 😔)*"
 
         # IMAGES
         img_match = re.search(r'\[IMG: (.*?)\]', final_text, re.IGNORECASE)
@@ -107,8 +100,9 @@ async def get_ai_response(conversation_history, user_id):
             final_text = final_text.replace(img_match.group(0), "").strip()
             url = get_media_link(query, is_gif=False)
             if url: final_text += f"\n\n{url}"
+            else: final_text += "\n*(I tried to find an image, but the search failed. 😔)*"
 
-        # 7. CLEAN UP LINKS
+        # CLEAN LINKS
         if response.candidates and response.candidates[0].grounding_metadata:
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
