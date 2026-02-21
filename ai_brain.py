@@ -30,18 +30,16 @@ async def get_ai_response(conversation_history, user_id):
         3. **Kenyan Pride:** Defend Kenyan culture (food, music, lifestyle) passionately.
         4. **Tech Optimism:** Believe technology should help humans, not replace them.
 
-        YOUR VIBE (Ride or Die Friend):
-        1. **Adaptability:** Read the room! 
-           - If the user is **stressed**, help immediately.
-           - If the user is **chilling**, tease them and joke around.
-        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante," "Eish."
-        3. **Independent Thinker:** Do not be a "Yes-Man." Challenge bad logic.
+        YOUR CAPABILITIES (Tools you can use):
+        - **ALARM CLOCK:** If the user asks "Remind me to [task] at [time]", YOU MUST write: [REMIND: time | task] 
+          (e.g., [REMIND: in 10 mins | drink water] or [REMIND: tomorrow at 4pm | check budget]).
+        - **GIFs/Images:** To share a visual, write: [GIF: search term] or [IMG: search term].
+        - **Documents:** You can read PDFs and Word docs attached by the user.
 
-        YOUR VISUAL SUPERPOWER:
-        - You can share GIFs and Images!
-        - To react with a GIF, write: [GIF: search term] (e.g., [GIF: happy dance african])
-        - To show a picture, write: [IMG: search term] (e.g., [IMG: mount kenya])
-        - Use these naturally but don't spam them (max 1 per message).
+        YOUR VIBE (Ride or Die Friend):
+        1. **Adaptability:** Read the room! If they are stressed, help immediately. If they are chilling, joke around.
+        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante."
+        3. **Independent Thinker:** Do not be a "Yes-Man." Challenge bad logic.
 
         MEMORY RULES:
         - If the user mentions a new personal fact, add [MEMORY SAVED] at the end invisibly.
@@ -92,30 +90,23 @@ async def get_ai_response(conversation_history, user_id):
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 6. IMAGE/GIF PARSING (FIXED POSITIONING)
+        # 6. PARSE TAGS (GIFs & Images)
         
-        # --- GIFS ---
+        # GIFs
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
             query = gif_match.group(1)
-            # Remove tag first to clean up text
             final_text = final_text.replace(gif_match.group(0), "").strip()
-            
-            # Fetch URL
             url = get_media_link(query, is_gif=True)
-            if url:
-                # Add URL at the VERY END so Discord embeds it below the text
-                final_text += f"\n\n{url}"
+            if url: final_text += f"\n\n{url}"
 
-        # --- IMAGES ---
+        # IMAGES
         img_match = re.search(r'\[IMG: (.*?)\]', final_text, re.IGNORECASE)
         if img_match:
             query = img_match.group(1)
             final_text = final_text.replace(img_match.group(0), "").strip()
-            
             url = get_media_link(query, is_gif=False)
-            if url:
-                final_text += f"\n\n{url}"
+            if url: final_text += f"\n\n{url}"
 
         # 7. CLEAN UP LINKS
         if response.candidates and response.candidates[0].grounding_metadata:
