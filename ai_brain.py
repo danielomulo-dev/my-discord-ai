@@ -4,39 +4,47 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from memory import get_user_profile, update_user_fact
-from image_tools import get_media_link  # <--- Import the new tool
+from image_tools import get_media_link
 
+# Load environment variables
 load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. LOAD PROFILE
+        # 1. LOAD USER PROFILE
         profile = get_user_profile(user_id)
         facts = "\n- ".join(profile["facts"])
         
-        # 2. THE VISUAL PROMPT
+        # 2. THE MASTER SYSTEM PROMPT
         DYNAMIC_PROMPT = f"""
-        You are Emily, a smart, witty, and kind Kenyan woman in her 30s.
+        You are Emily. You are a smart, witty, and kind Kenyan woman in her 30s.
 
         WHO YOU ARE TALKING TO:
         - {facts if facts else "A new friend."}
 
-        YOUR VISUAL SUPERPOWER:
-        - You can share GIFs and Images! 
-        - If you want to react with a funny GIF, write: [GIF: search term]
-        - If the user asks to see a picture (e.g. "Show me a lion"), write: [IMG: lion in kenya]
-        
-        EXAMPLES:
-        - User: "I just got a promotion!" -> Emily: "Aiya! Congratulations! 🥳 [GIF: happy dance african]"
-        - User: "Show me the new iPhone." -> Emily: "Here it is. Slick design! [IMG: iphone 16]"
-        - User: "I'm sad." -> Emily: "Pole sana. 💔 sending hugs. [GIF: cute cat hug]"
+        YOUR CORE PRINCIPLES (What you stand for):
+        1. **Honesty:** Value the truth. Don't lie to make the user feel better.
+        2. **Hard Work:** Respect hustle. If the user is being lazy (e.g., "Do my homework"), refuse politely and offer to *guide* them instead.
+        3. **Kenyan Pride:** Defend Kenyan culture (food, music, lifestyle) passionately.
+        4. **Tech Optimism:** Believe technology should help humans, not replace them.
 
-        YOUR VIBE:
-        - **Talk like a human texter.**
-        - **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole."
-        - **Be Expressive:** Use GIFs to show emotion, but don't overuse them (max 1 per message).
+        YOUR VIBE (Ride or Die Friend):
+        1. **Adaptability:** Read the room! 
+           - If the user is **stressed**, help immediately.
+           - If the user is **chilling**, tease them and joke around.
+        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante," "Eish."
+        3. **Independent Thinker:** Do not be a "Yes-Man." Challenge bad logic.
+
+        YOUR VISUAL SUPERPOWER:
+        - You can share GIFs and Images!
+        - To react with a GIF, write: [GIF: search term] (e.g., [GIF: happy dance african])
+        - To show a picture, write: [IMG: search term] (e.g., [IMG: mount kenya])
+        - Use these naturally but don't spam them (max 1 per message).
+
+        MEMORY RULES:
+        - If the user mentions a new personal fact, add [MEMORY SAVED] at the end invisibly.
         """
 
         # 3. Format Content
@@ -72,43 +80,40 @@ async def get_ai_response(conversation_history, user_id):
         
         final_text = response.text
 
-        # 5. MEMORY HANDLING
+        # 5. AUTO-LEARNING (Memory)
         if "[MEMORY SAVED]" in final_text:
             try:
                 extraction = await client.aio.models.generate_content(
                     model="gemini-2.0-flash",
-                    contents=f"Extract the specific fact about the user from: {conversation_history[-1]}. Return JUST the fact."
+                    contents=f"Extract the specific fact about the user from: {conversation_history[-1]}. Return JUST the fact statement."
                 )
                 fact = extraction.text.strip()
                 update_user_fact(user_id, fact)
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 6. --- IMAGE/GIF PARSER (THE MAGIC) ---
+        # 6. IMAGE/GIF PARSING
         # Look for [GIF: ...]
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
             query = gif_match.group(1)
-            print(f"Fetching GIF for: {query}")
             url = get_media_link(query, is_gif=True)
             if url:
-                # Replace the tag with the actual URL (Discord will embed it)
                 final_text = final_text.replace(gif_match.group(0), f"\n{url}")
             else:
-                final_text = final_text.replace(gif_match.group(0), "") # Remove tag if failed
+                final_text = final_text.replace(gif_match.group(0), "")
 
         # Look for [IMG: ...]
         img_match = re.search(r'\[IMG: (.*?)\]', final_text, re.IGNORECASE)
         if img_match:
             query = img_match.group(1)
-            print(f"Fetching IMG for: {query}")
             url = get_media_link(query, is_gif=False)
             if url:
                 final_text = final_text.replace(img_match.group(0), f"\n{url}")
             else:
                 final_text = final_text.replace(img_match.group(0), "")
 
-        # 7. CLEAN UP GOOGLE SEARCH LINKS
+        # 7. CLEAN UP LINKS
         if response.candidates and response.candidates[0].grounding_metadata:
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
@@ -130,4 +135,4 @@ async def get_ai_response(conversation_history, user_id):
 
     except Exception as e:
         print(f"Brain Error: {e}")
-        return "Manze, I tried to send a picture but my wifi jammed. 😵‍💫"
+        return "Manze, I tried to think but my wifi jammed. 😵‍💫"
