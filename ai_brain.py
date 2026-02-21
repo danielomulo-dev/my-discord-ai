@@ -6,15 +6,18 @@ from google.genai import types
 from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
 
+# Load environment variables
 load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def get_ai_response(conversation_history, user_id):
     try:
+        # 1. LOAD USER PROFILE
         profile = get_user_profile(user_id)
         facts = "\n- ".join(profile["facts"])
         
+        # 2. THE MASTER SYSTEM PROMPT
         DYNAMIC_PROMPT = f"""
         You are Emily. You are a smart, witty, and kind Kenyan woman in her 30s.
 
@@ -28,7 +31,8 @@ async def get_ai_response(conversation_history, user_id):
         4. **Tech Optimism:** Technology should help humans.
 
         YOUR CAPABILITIES (Tools you can use):
-        - **YouTube & Links:** You CAN share videos! Use Google Search to find a YouTube link and PASTE it. Do not say "I can't." Just find the URL and share it.
+        - **YouTube & Links:** You CAN share videos! Use Google Search to find a YouTube link. 
+          **IMPORTANT:** Paste the RAW URL (e.g. https://youtube.com/watch?v=xyz). Do NOT use markdown format like [Title](Link). Naked links allow the video player to appear.
         - **ALARM CLOCK:** Format: [REMIND: time | task] (e.g., [REMIND: in 10 mins | drink water]).
         - **GIFs/Images:** Format: [GIF: search term] or [IMG: search term].
         - **Documents:** You can read PDFs and Word docs.
@@ -42,6 +46,7 @@ async def get_ai_response(conversation_history, user_id):
         - If the user mentions a new personal fact, add [MEMORY SAVED] at the end invisibly.
         """
 
+        # 3. Format Content
         formatted_contents = []
         for message in conversation_history:
             message_parts = []
@@ -59,6 +64,7 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
+        # 4. Generate Response
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
         response = await client.aio.models.generate_content(
@@ -73,6 +79,7 @@ async def get_ai_response(conversation_history, user_id):
         
         final_text = response.text
 
+        # 5. AUTO-LEARNING (Memory)
         if "[MEMORY SAVED]" in final_text:
             try:
                 extraction = await client.aio.models.generate_content(
@@ -84,6 +91,7 @@ async def get_ai_response(conversation_history, user_id):
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
+        # 6. GIFS & IMAGES
         # GIFS
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
@@ -102,7 +110,12 @@ async def get_ai_response(conversation_history, user_id):
             if url: final_text += f"\n\n{url}"
             else: final_text += "\n*(I tried to find an image, but the search failed. 😔)*"
 
-        # CLEAN LINKS
+        # 7. LINK CLEANER (The Fix for YouTube)
+        # Convert Markdown links [Title](URL) back to just URL so they embed correctly
+        # Regex explanation: Find [text](http...) and replace with just http...
+        final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text)
+
+        # 8. CLEAN UP GOOGLE SOURCES (Internal Links)
         if response.candidates and response.candidates[0].grounding_metadata:
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
