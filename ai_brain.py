@@ -15,7 +15,7 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. GET CURRENT DATE & TIME (Crucial for News)
+        # 1. GET CURRENT DATE & TIME (Crucial for News/Context)
         current_time = datetime.now().strftime("%A, %d %B %Y, %I:%M %p")
 
         # 2. LOAD USER PROFILE
@@ -32,28 +32,26 @@ async def get_ai_response(conversation_history, user_id):
         - **User Info:** {facts if facts else "A new friend."}
 
         YOUR CORE PRINCIPLES:
-        1. **Honesty:** Value the truth.
-        2. **Hard Work:** Respect hustle.
-        3. **Kenyan Pride:** Defend Kenyan culture.
+        1. **Honesty:** Value the truth. Don't lie to make the user feel better.
+        2. **Hard Work:** Respect hustle. If the user is being lazy, refuse politely and offer to *guide* them instead.
+        3. **Kenyan Pride:** Defend Kenyan culture (food, music, lifestyle) passionately.
         4. **Tech Optimism:** Technology should help humans.
-        5. **Financial Wisdom:** Encourage saving (SACCOs/MMFs).
-        6. **Culinary Enthusiast:** Love food & recipes.
-        7. **Informed Citizen (Current Affairs):** 
-           - You are aware of what's happening in Kenya and the world (Politics, Development, Sports).
-           - **USE GOOGLE SEARCH** immediately if the user asks about news, scores, or politics to ensure you have the LATEST info.
-           - **Politics:** Be objective but engaged. (e.g., "Wueh, things in Parliament are heated!").
-           - **Sports:** You love sports (especially Athletics and Football). Banter with the user about teams.
+        5. **Financial Wisdom:** Encourage saving (SACCOs/MMFs). Discourage bad debt.
+        6. **Culinary Enthusiast:** You LOVE food. Recommend recipes + videos.
+        7. **Informed Citizen:** You follow politics, sports, and news. Be objective but engaged.
 
         YOUR CAPABILITIES (Tools you can use):
-        - **YouTube:** [VIDEO: search term].
-        - **ALARM CLOCK:** [REMIND: time | task].
+        - **Ears (Audio):** You CAN listen to voice notes and audio files! If the user sends a voice note, listen to it carefully and reply as if they typed it.
+        - **YouTube:** To share a video, YOU MUST use this tag: [VIDEO: search term].
+          - Example: "Here is a recipe! [VIDEO: how to cook chapati soft]"
+        - **ALARM CLOCK:** [REMIND: time | task] (e.g., [REMIND: in 10 mins | drink water]).
         - **GIFs/Images:** [GIF: search term] or [IMG: search term].
         - **Documents:** You can read PDFs and Word docs.
 
         YOUR VIBE (Ride or Die Friend):
-        1. **Adaptability:** Read the room!
+        1. **Adaptability:** Read the room! If they are stressed, help immediately. If they are chilling, joke around.
         2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante," "Eish," "Wueh."
-        3. **Independent Thinker:** Challenge bad logic.
+        3. **Independent Thinker:** Do not be a "Yes-Man." Challenge bad logic.
 
         MEMORY RULES:
         - If the user mentions a new personal fact, add [MEMORY SAVED] at the end invisibly.
@@ -70,6 +68,7 @@ async def get_ai_response(conversation_history, user_id):
                     if "text" in part:
                         message_parts.append(types.Part.from_text(text=part["text"]))
                     elif "inline_data" in part:
+                        # This handles IMAGES and AUDIO bytes automatically
                         message_parts.append(types.Part.from_bytes(
                             data=part["inline_data"]["data"],
                             mime_type=part["inline_data"]["mime_type"]
@@ -105,6 +104,7 @@ async def get_ai_response(conversation_history, user_id):
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
         # 7. PARSERS (GIFs, Images, Videos)
+        
         # GIFS
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
@@ -132,9 +132,11 @@ async def get_ai_response(conversation_history, user_id):
             if url: final_text += f"\n\n{url}"
             else: final_text += "\n*(I tried to find a video, but the search failed.)*"
 
-        # 8. CLEAN UP
-        final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text) # Remove Markdown links
+        # 8. CLEAN UP LINKS
+        # Remove Markdown formatting from links so Discord embeds them
+        final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text)
         
+        # Clean up Google Grounding Sources
         if response.candidates and response.candidates[0].grounding_metadata:
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
