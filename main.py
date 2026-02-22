@@ -13,14 +13,16 @@ from dotenv import load_dotenv
 from ai_brain import get_ai_response
 from web_tools import extract_text_from_url
 from file_tools import extract_text_from_pdf, extract_text_from_docx
-from memory import add_message_to_history, get_chat_history, add_reminder, get_due_reminders, delete_reminder
+# Import the NEW set_voice_mode function
+from memory import add_message_to_history, get_chat_history, add_reminder, get_due_reminders, delete_reminder, get_user_profile, set_voice_mode
+from voice_tools import generate_voice_note, cleanup_voice_file
 
 load_dotenv()
 
 # --- Web Server ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Emily is Online with Ears!"
+def home(): return "Emily is Online with Voice Toggle!"
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
@@ -53,39 +55,52 @@ async def check_reminders_loop():
 async def on_message(message):
     if message.author == client.user: return
 
+    # --- COMMANDS: VOICE TOGGLE ---
+    # This handles switching modes on/off
+    if message.content.lower() == "!voice on":
+        set_voice_mode(message.author.id, True)
+        await message.channel.send("🎙️ **Voice Mode Activated!** I will now speak my responses.")
+        return
+    
+    if message.content.lower() == "!voice off":
+        set_voice_mode(message.author.id, False)
+        await message.channel.send("📝 **Voice Mode Deactivated.** Back to text only.")
+        return
+
+    # --- NORMAL CONVERSATION ---
     if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
         
         user_id = message.author.id
         user_text = message.content.replace(f'<@{client.user.id}>', '').strip()
         
-        # 1. PROCESS LINKS
+        # 1. CHECK VOICE PREFERENCE
+        # Load profile to see if Voice Mode is ON
+        profile = get_user_profile(user_id)
+        should_speak = profile.get("voice_mode", False) # Default is False (Off)
+
+        # 2. PROCESS LINKS
         urls = re.findall(URL_PATTERN, user_text)
         if urls:
             scraped_content = extract_text_from_url(urls[0])
             user_text += f"\n\n{scraped_content}"
 
-        # 2. PROCESS ATTACHMENTS (Images, Files, AND NOW AUDIO)
-        media_data = None # Can be image OR audio
+        # 3. PROCESS ATTACHMENTS
+        media_data = None
         doc_text = ""
 
         if message.attachments:
             for attachment in message.attachments:
                 filename = attachment.filename.lower()
-                
-                # A. IMAGES
                 if filename.endswith(('.png', '.jpg', '.jpeg', '.webp')):
                     image_bytes = await attachment.read()
                     media_data = {"mime_type": attachment.content_type, "data": image_bytes}
-                
-                # B. AUDIO (Voice Notes) - NEW FEATURE
                 elif filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
+                    # If user sends audio, force voice reply even if mode is off
                     print(f"👂 Audio detected: {filename}")
-                    await message.channel.send("👂 *Listening to your voice note...*")
+                    await message.channel.send("👂 *Listening...*")
                     audio_bytes = await attachment.read()
-                    # Discord usually sends voice notes as audio/ogg
                     media_data = {"mime_type": attachment.content_type or "audio/ogg", "data": audio_bytes}
-
-                # C. DOCUMENTS
+                    should_speak = True 
                 elif filename.endswith('.pdf'):
                     file_bytes = await attachment.read()
                     doc_text += extract_text_from_pdf(file_bytes)
@@ -95,20 +110,22 @@ async def on_message(message):
         
         if doc_text: user_text += f"\n\n{doc_text}"
 
-        # 3. SAVE TO HISTORY
+        # Check explicit keywords override
+        if any(word in user_text.lower() for word in ["say", "speak", "tell me", "read", "voice"]):
+            should_speak = True
+
+        # 4. SAVE TO HISTORY
         new_message_parts = [{"text": user_text}]
-        if media_data: 
-            new_message_parts.append({"inline_data": media_data})
-        
+        if media_data: new_message_parts.append({"inline_data": media_data})
         add_message_to_history(user_id, "user", new_message_parts)
 
-        # 4. GET RESPONSE
+        # 5. GET RESPONSE
         history = get_chat_history(user_id)
         
         async with message.channel.typing():
             response_text = await get_ai_response(history, user_id)
             
-            # Check for Reminders tag
+            # Check Reminders
             remind_match = re.search(r'\[REMIND: (.*?) \| (.*?)\]', response_text, re.IGNORECASE)
             if remind_match:
                 time_str = remind_match.group(1)
@@ -117,16 +134,17 @@ async def on_message(message):
                 if real_time:
                     add_reminder(user_id, message.channel.id, real_time, task_str)
                     response_text = response_text.replace(remind_match.group(0), f"✅ *Alarm set for {time_str}*")
-                else:
-                    response_text = response_text.replace(remind_match.group(0), "❌ *Time not understood.*")
 
             add_message_to_history(user_id, "model", [{"text": response_text}])
 
-            if len(response_text) > 2000:
-                for i in range(0, len(response_text), 2000):
-                    await message.channel.send(response_text[i:i+2000])
-            else:
-                await message.channel.send(response_text)
+            # 6. SEND REPLY
+            await message.channel.send(response_text[:2000])
+            
+            if should_speak:
+                voice_file = await generate_voice_note(response_text)
+                if voice_file:
+                    await message.channel.send(file=discord.File(voice_file))
+                    cleanup_voice_file(voice_file)
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_web_server)

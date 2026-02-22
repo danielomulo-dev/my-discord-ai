@@ -11,4 +11,5 @@ pypdf
 python-docx
 duckduckgo-search
 dateparser
+edge-tts
 

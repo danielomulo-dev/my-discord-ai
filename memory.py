@@ -87,3 +87,13 @@ def get_due_reminders():
 def delete_reminder(reminder_id):
     """Removes a reminder after sending."""
     reminders_col.delete_one({"_id": reminder_id})
+    
+    # --- SETTINGS FUNCTIONS ---
+def set_voice_mode(user_id, enabled):
+    """Turns voice mode ON (True) or OFF (False) for a user."""
+    user_id = str(user_id)
+    users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"voice_mode": enabled}}, # $set saves a specific setting
+        upsert=True
+    )
