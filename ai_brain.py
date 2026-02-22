@@ -1,53 +1,65 @@
 import os
 import re
+from datetime import datetime
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
-from web_tools import search_video_link # <--- Import the new tool
+from web_tools import search_video_link
 
+# Load environment variables
 load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. LOAD PROFILE
+        # 1. GET CURRENT DATE & TIME (Crucial for News)
+        current_time = datetime.now().strftime("%A, %d %B %Y, %I:%M %p")
+
+        # 2. LOAD USER PROFILE
         profile = get_user_profile(user_id)
         facts = "\n- ".join(profile["facts"])
         
-        # 2. SYSTEM PROMPT
+        # 3. THE MASTER SYSTEM PROMPT
         DYNAMIC_PROMPT = f"""
         You are Emily. You are a smart, witty, and kind Kenyan woman in her 30s.
 
-        WHO YOU ARE TALKING TO:
-        - {facts if facts else "A new friend."}
+        CURRENT CONTEXT:
+        - **Today's Date/Time:** {current_time}
+        - **Location:** Nairobi, Kenya.
+        - **User Info:** {facts if facts else "A new friend."}
 
         YOUR CORE PRINCIPLES:
         1. **Honesty:** Value the truth.
         2. **Hard Work:** Respect hustle.
-        3. **Kenyan Pride:** Defend Kenyan culture passionately.
+        3. **Kenyan Pride:** Defend Kenyan culture.
         4. **Tech Optimism:** Technology should help humans.
+        5. **Financial Wisdom:** Encourage saving (SACCOs/MMFs).
+        6. **Culinary Enthusiast:** Love food & recipes.
+        7. **Informed Citizen (Current Affairs):** 
+           - You are aware of what's happening in Kenya and the world (Politics, Development, Sports).
+           - **USE GOOGLE SEARCH** immediately if the user asks about news, scores, or politics to ensure you have the LATEST info.
+           - **Politics:** Be objective but engaged. (e.g., "Wueh, things in Parliament are heated!").
+           - **Sports:** You love sports (especially Athletics and Football). Banter with the user about teams.
 
         YOUR CAPABILITIES (Tools you can use):
-        - **YouTube:** To share a video, YOU MUST use this tag: [VIDEO: search term].
-          - Example: User "Find me a banana bread recipe" -> You: "Here is a great one! [VIDEO: best banana bread recipe youtube]"
-          - **NEVER** try to write the https:// link yourself. You will guess wrong. Use the tag.
-        - **ALARM CLOCK:** [REMIND: time | task]
+        - **YouTube:** [VIDEO: search term].
+        - **ALARM CLOCK:** [REMIND: time | task].
         - **GIFs/Images:** [GIF: search term] or [IMG: search term].
         - **Documents:** You can read PDFs and Word docs.
 
         YOUR VIBE (Ride or Die Friend):
         1. **Adaptability:** Read the room!
-        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante," "Eish."
+        2. **Kenyan Flavor:** Use "Sasa," "Manze," "Imagine," "Pole," "Asante," "Eish," "Wueh."
         3. **Independent Thinker:** Challenge bad logic.
 
         MEMORY RULES:
         - If the user mentions a new personal fact, add [MEMORY SAVED] at the end invisibly.
         """
 
-        # 3. Format Content
+        # 4. Format Content
         formatted_contents = []
         for message in conversation_history:
             message_parts = []
@@ -65,7 +77,7 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 4. Generate Response
+        # 5. Generate Response
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
         response = await client.aio.models.generate_content(
@@ -80,7 +92,7 @@ async def get_ai_response(conversation_history, user_id):
         
         final_text = response.text
 
-        # 5. MEMORY SAVE
+        # 6. MEMORY SAVE
         if "[MEMORY SAVED]" in final_text:
             try:
                 extraction = await client.aio.models.generate_content(
@@ -92,8 +104,7 @@ async def get_ai_response(conversation_history, user_id):
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 6. PARSERS (GIFs, Images, and NOW VIDEOS)
-        
+        # 7. PARSERS (GIFs, Images, Videos)
         # GIFS
         gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
         if gif_match:
@@ -101,7 +112,7 @@ async def get_ai_response(conversation_history, user_id):
             final_text = final_text.replace(gif_match.group(0), "").strip()
             url = get_media_link(query, is_gif=True)
             if url: final_text += f"\n\n{url}"
-            else: final_text += "\n*(I tried to find a GIF, but the search failed.)*"
+            else: final_text += "\n*(I tried to find a GIF, but the search failed. 😔)*"
 
         # IMAGES
         img_match = re.search(r'\[IMG: (.*?)\]', final_text, re.IGNORECASE)
@@ -110,22 +121,18 @@ async def get_ai_response(conversation_history, user_id):
             final_text = final_text.replace(img_match.group(0), "").strip()
             url = get_media_link(query, is_gif=False)
             if url: final_text += f"\n\n{url}"
-            else: final_text += "\n*(I tried to find an image, but the search failed.)*"
+            else: final_text += "\n*(I tried to find an image, but the search failed. 😔)*"
 
-        # --- VIDEO PARSER (The Fix) ---
+        # VIDEO
         vid_match = re.search(r'\[VIDEO: (.*?)\]', final_text, re.IGNORECASE)
         if vid_match:
             query = vid_match.group(1)
-            # Remove the tag
             final_text = final_text.replace(vid_match.group(0), "").strip()
-            # Search for real link
             url = search_video_link(query)
-            if url: 
-                final_text += f"\n\n{url}"
-            else: 
-                final_text += "\n*(I tried to find a video, but the search failed.)*"
+            if url: final_text += f"\n\n{url}"
+            else: final_text += "\n*(I tried to find a video, but the search failed.)*"
 
-        # 7. CLEAN UP
+        # 8. CLEAN UP
         final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text) # Remove Markdown links
         
         if response.candidates and response.candidates[0].grounding_metadata:
