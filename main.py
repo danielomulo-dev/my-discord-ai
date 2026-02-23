@@ -3,6 +3,7 @@ import threading
 import re
 import asyncio
 import dateparser
+import sys # <--- Added sys to allow restarting
 from datetime import datetime
 from flask import Flask
 import discord
@@ -46,12 +47,13 @@ URL_PATTERN = r'(https?://\S+)'
 @client.event
 async def on_ready():
     print(f'✅ Logged in as {client.user}')
-    # Start the background clock for reminders
-    # This also helps keep the connection alive
+    
+    # Start the background tasks
     if not check_reminders_loop.is_running():
         check_reminders_loop.start()
+        print("⏰ Reminder loop started")
 
-# --- BACKGROUND TASK: ALARM CLOCK ---
+# --- BACKGROUND TASK 1: ALARM CLOCK ---
 @tasks.loop(seconds=60)
 async def check_reminders_loop():
     try:
@@ -85,26 +87,23 @@ async def on_message(message):
         return
 
     # --- CONVERSATION LOGIC ---
-    # Only reply if DM'd or Mentioned
     if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
         
         user_id = message.author.id
-        # Remove the @mention from the text so she doesn't read it
         user_text = message.content.replace(f'<@{client.user.id}>', '').strip()
         
         # 1. CHECK VOICE PREFERENCE
-        # Load profile to see if Voice Mode is ON
         profile = get_user_profile(user_id)
-        should_speak = profile.get("voice_mode", False) # Default is False (Off)
+        should_speak = profile.get("voice_mode", False) 
 
-        # 2. PROCESS LINKS (Web Scraping)
+        # 2. PROCESS LINKS
         urls = re.findall(URL_PATTERN, user_text)
         if urls:
             await message.channel.send(f"👀 *Checking link...*")
             scraped_content = extract_text_from_url(urls[0])
             user_text += f"\n\n{scraped_content}"
 
-        # 3. PROCESS ATTACHMENTS (Images, Audio, Docs)
+        # 3. PROCESS ATTACHMENTS
         media_data = None
         doc_text = ""
 
@@ -123,7 +122,7 @@ async def on_message(message):
                     await message.channel.send("👂 *Listening...*")
                     audio_bytes = await attachment.read()
                     media_data = {"mime_type": attachment.content_type or "audio/ogg", "data": audio_bytes}
-                    should_speak = True # Force voice reply if user speaks
+                    should_speak = True 
                 
                 # C. DOCUMENTS
                 elif filename.endswith('.pdf'):
@@ -135,14 +134,12 @@ async def on_message(message):
                     file_bytes = await attachment.read()
                     doc_text += extract_text_from_docx(file_bytes)
         
-        # Append document text if any
         if doc_text: user_text += f"\n\n{doc_text}"
 
-        # Check explicit keywords to trigger voice
         if any(word in user_text.lower() for word in ["say", "speak", "tell me", "read", "voice"]):
             should_speak = True
 
-        # 4. SAVE USER MESSAGE TO HISTORY
+        # 4. SAVE USER MESSAGE
         new_message_parts = [{"text": user_text}]
         if media_data: new_message_parts.append({"inline_data": media_data})
         add_message_to_history(user_id, "user", new_message_parts)
@@ -153,14 +150,11 @@ async def on_message(message):
         async with message.channel.typing():
             response_text = await get_ai_response(history, user_id)
             
-            # --- CHECK FOR REMINDERS ---
-            # Tag format: [REMIND: time string | task string]
+            # Check Reminders
             remind_match = re.search(r'\[REMIND: (.*?) \| (.*?)\]', response_text, re.IGNORECASE)
             if remind_match:
                 time_str = remind_match.group(1)
                 task_str = remind_match.group(2)
-                
-                # Parse the time
                 real_time = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
                 
                 if real_time:
@@ -170,18 +164,17 @@ async def on_message(message):
                 else:
                     response_text = response_text.replace(remind_match.group(0), "❌ *I couldn't understand that time.*")
 
-            # Save AI Response to History
+            # Save AI Response
             add_message_to_history(user_id, "model", [{"text": response_text}])
 
             # 6. SEND TEXT REPLY
-            # Discord has a 2000 char limit
             if len(response_text) > 2000:
                 for i in range(0, len(response_text), 2000):
                     await message.channel.send(response_text[i:i+2000])
             else:
                 await message.channel.send(response_text)
             
-            # 7. SEND AUDIO REPLY (If enabled)
+            # 7. SEND AUDIO REPLY
             if should_speak:
                 voice_file = await generate_voice_note(response_text)
                 if voice_file:
@@ -190,9 +183,13 @@ async def on_message(message):
 
 # --- START THE BOT ---
 if __name__ == "__main__":
-    # Start web server in background thread
+    # Start web server
     t = threading.Thread(target=run_web_server)
     t.start()
     
-    # Start Discord Bot
-    client.run(os.getenv("DISCORD_TOKEN"))
+    # Run Bot
+    try:
+        client.run(os.getenv("DISCORD_TOKEN"))
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+        # If it crashes, this print might show up in logs next time
