@@ -9,7 +9,6 @@ requests
 youtube-transcript-api
 pypdf
 python-docx
-duckduckgo-search
 dateparser
-edge-tts
+
 
