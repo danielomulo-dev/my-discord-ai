@@ -3,7 +3,7 @@ import threading
 import re
 import asyncio
 import dateparser
-import sys # <--- Added sys to allow restarting
+import sys
 from datetime import datetime
 from flask import Flask
 import discord
@@ -53,7 +53,7 @@ async def on_ready():
         check_reminders_loop.start()
         print("⏰ Reminder loop started")
 
-# --- BACKGROUND TASK 1: ALARM CLOCK ---
+# --- BACKGROUND TASK: ALARM CLOCK ---
 @tasks.loop(seconds=60)
 async def check_reminders_loop():
     try:
@@ -62,9 +62,7 @@ async def check_reminders_loop():
             channel = client.get_channel(int(reminder['channel_id']))
             if channel:
                 await channel.send(f"🔔 **REMINDER:** <@{reminder['user_id']}> {reminder['text']}")
-                print(f"Sent reminder to {reminder['user_id']}")
             
-            # Delete from DB so we don't send it twice
             delete_reminder(reminder['_id'])
     except Exception as e:
         print(f"Loop Error: {e}")
@@ -72,7 +70,6 @@ async def check_reminders_loop():
 # --- MAIN MESSAGE HANDLER ---
 @client.event
 async def on_message(message):
-    # Don't talk to yourself
     if message.author == client.user: return
 
     # --- COMMANDS: VOICE TOGGLE ---
@@ -187,9 +184,8 @@ if __name__ == "__main__":
     t = threading.Thread(target=run_web_server)
     t.start()
     
-    # Run Bot
+    # Run Bot with Error Handling
     try:
         client.run(os.getenv("DISCORD_TOKEN"))
     except Exception as e:
         print(f"❌ Connection Error: {e}")
-        # If it crashes, this print might show up in logs next time
