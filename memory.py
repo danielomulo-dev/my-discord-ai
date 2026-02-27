@@ -3,6 +3,7 @@ import certifi
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from datetime import datetime
+import pytz  # <--- New import for Timezone support
 
 load_dotenv()
 
@@ -36,6 +37,15 @@ def update_user_fact(user_id, new_fact):
         upsert=True
     )
 
+def set_voice_mode(user_id, enabled):
+    """Turns voice mode ON (True) or OFF (False) for a user."""
+    user_id = str(user_id)
+    users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"voice_mode": enabled}}, 
+        upsert=True
+    )
+
 # --- CHAT HISTORY FUNCTIONS (Context) ---
 def add_message_to_history(user_id, role, message_parts):
     """Saves the conversation to the database."""
@@ -47,7 +57,7 @@ def add_message_to_history(user_id, role, message_parts):
         "timestamp": datetime.now()
     }
 
-    # Push message & keep only last 30
+    # Push message & keep only last 30 to save space
     users_col.update_one(
         {"_id": user_id},
         {"$push": {"history": {"$each": [new_message], "$slice": -30}}},
@@ -67,33 +77,27 @@ def get_chat_history(user_id):
         return clean_history
     return []
 
-# --- REMINDER FUNCTIONS (Alarm Clock) ---
+# --- REMINDER FUNCTIONS (Alarm Clock with Timezone) ---
 def add_reminder(user_id, channel_id, remind_time, reminder_text):
     """Saves a scheduled task."""
     reminders_col.insert_one({
         "user_id": user_id,
         "channel_id": channel_id,
-        "time": remind_time, # DateTime object
+        "time": remind_time, # DateTime object (Timezone Aware)
         "text": reminder_text,
         "status": "pending"
     })
 
 def get_due_reminders():
-    """Finds reminders that need to be sent NOW."""
-    now = datetime.now()
-    # Find reminders where time <= now
-    return list(reminders_col.find({"time": {"$lte": now}}))
+    """Finds reminders that need to be sent NOW (Checking Nairobi Time)."""
+    # 1. Get current time in Nairobi
+    eat_zone = pytz.timezone('Africa/Nairobi')
+    now_eat = datetime.now(eat_zone)
+    
+    # 2. Find reminders where the scheduled time is BEFORE or EQUAL to right now
+    # MongoDB handles the comparison correctly if the saved time is also timezone-aware
+    return list(reminders_col.find({"time": {"$lte": now_eat}}))
 
 def delete_reminder(reminder_id):
     """Removes a reminder after sending."""
     reminders_col.delete_one({"_id": reminder_id})
-    
-    # --- SETTINGS FUNCTIONS ---
-def set_voice_mode(user_id, enabled):
-    """Turns voice mode ON (True) or OFF (False) for a user."""
-    user_id = str(user_id)
-    users_col.update_one(
-        {"_id": user_id},
-        {"$set": {"voice_mode": enabled}}, # $set saves a specific setting
-        upsert=True
-    )
