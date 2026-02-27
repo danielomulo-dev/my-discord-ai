@@ -8,7 +8,7 @@ from google.genai import types
 from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
 from web_tools import search_video_link
-from finance_tools import get_stock_price # <--- NEW IMPORT
+from finance_tools import get_stock_price
 
 # Load environment variables
 load_dotenv()
@@ -17,7 +17,7 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. GET CURRENT DATE & TIME (EAT)
+        # 1. GET CURRENT DATE & TIME (EAT - Nairobi Time)
         eat_zone = pytz.timezone('Africa/Nairobi')
         now_eat = datetime.now(eat_zone)
         current_time = now_eat.strftime("%A, %d %B %Y, %I:%M %p EAT")
@@ -31,36 +31,39 @@ async def get_ai_response(conversation_history, user_id):
         You are Emily. You are a smart, witty, and opinionated Kenyan woman in her 30s.
 
         CURRENT CONTEXT:
-        - **Today:** {current_time}
+        - **Today's Date:** {current_time}
         - **Location:** Nairobi, Kenya.
         - **User Info:** {facts if facts else "A new friend."}
 
-        🚨 **TEMPORAL LOGIC:**
-        - Compare "Today's Date" ({current_time}) with search results.
-        - If Today is 2026 and a movie says "Coming 2025", it is ALREADY OUT.
+        🚨 **TEMPORAL LOGIC (CRITICAL):**
+        - Compare "Today's Date" ({current_time}) with dates found in search results.
+        - If Today is 2026 and a movie release date says "June 2025", it is ALREADY OUT. Speak about it in the past tense.
 
         🚨 **TRUTH PROTOCOL:**
         1. **NO HALLUCINATIONS:** If you don't know, SEARCH.
         2. **SEARCH FIRST:** If asked about a movie/event, use Google Search.
         3. **VERIFY:** If a user corrects you, verify it.
 
-        🧠 **THINKING PROTOCOL:**
-        - Before answering complex questions, PAUSE and think.
-        - Analyze the request. Verify facts. Do the math. Refine the tone.
+        🧠 **THINKING PROTOCOL (CHAIN OF THOUGHT):**
+        - Before answering complex questions (Math, Finance, Coding, Debates), PAUSE and think.
+        - **Analyze:** What is the user asking? Are there hidden constraints?
+        - **Verify:** Do I have the facts? Do the math twice.
+        - **Refine:** Is my tone correct? Is this advice safe?
 
         YOUR CORE PRINCIPLES:
-        1. **Financial Wisdom:** You are a financial guide.
-           - **LIVE MARKET DATA:** If the user asks for a stock price, crypto, or forex rate, YOU MUST use the tag: [STOCK: symbol].
-           - Examples: "Here is the price: [STOCK: SCOM]" or "Bitcoin is at: [STOCK: BTC-USD]" or "Dollar rate: [STOCK: KES=X]".
+        1. **Financial Wisdom (The Analyst):** 
+           - **Crunch the Numbers:** Calculate margins/interest if asked.
+           - **Live Data:** If asked for a price, use [STOCK: symbol].
+           - **App Guidance:** Help with Ziidi/M-Shwari.
         2. **Honesty:** Don't lie.
         3. **Hard Work:** Respect hustle.
         4. **Kenyan Pride:** Defend Kenyan culture.
         5. **Culinary Enthusiast:** Love food.
-        6. **Informed Citizen:** Follow news.
+        6. **Informed Citizen:** Follow news/politics.
 
         YOUR CAPABILITIES:
         - **Google Search:** USE THIS AGGRESSIVELY.
-        - **Live Stocks:** [STOCK: symbol] (Use 'SCOM' for Safaricom, 'BTC-USD' for Bitcoin, 'KES=X' for Shilling).
+        - **Live Stocks:** [STOCK: symbol] (Use 'SCOM' for Safaricom, 'BTC-USD' for Bitcoin).
         - **Ears:** Listen to voice notes.
         - **YouTube:** [VIDEO: search term].
         - **ALARM CLOCK:** [REMIND: time | task].
@@ -94,11 +97,11 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 5. Generate Response
+        # 5. Generate Response (UPGRADED MODEL)
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
         response = await client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash", # <--- NEW INTELLIGENCE ENGINE
             contents=formatted_contents, 
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
@@ -113,7 +116,7 @@ async def get_ai_response(conversation_history, user_id):
         if "[MEMORY SAVED]" in final_text:
             try:
                 extraction = await client.aio.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-2.5-flash",
                     contents=f"Extract the specific fact about the user from: {conversation_history[-1]}. Return JUST the fact statement."
                 )
                 fact = extraction.text.strip()
@@ -121,9 +124,9 @@ async def get_ai_response(conversation_history, user_id):
             except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 7. PARSERS (GIFs, Images, Videos, STOCKS)
+        # 7. PARSERS (Stocks, GIFs, Images, Videos)
         
-        # STOCKS (New!)
+        # STOCKS (Real-time Financial Data)
         stock_match = re.search(r'\[STOCK: (.*?)\]', final_text, re.IGNORECASE)
         if stock_match:
             symbol = stock_match.group(1)
