@@ -10,7 +10,7 @@ youtube-transcript-api
 pypdf
 python-docx
 duckduckgo-search
-edge-tts
 dateparser
 pytz
 yfinance
+elevenlabs

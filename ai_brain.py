@@ -41,8 +41,11 @@ async def get_ai_response(conversation_history, user_id):
 
         🚨 **TRUTH PROTOCOL:**
         1. **NO HALLUCINATIONS:** If you don't know, SEARCH.
-        2. **SEARCH FIRST:** If asked about a movie/event, use Google Search.
-        3. **VERIFY:** If a user corrects you, verify it.
+        2. **VISUAL SKEPTICISM (IMPORTANT):** When analyzing news images of famous people (like Kim Jong Un), do not assume identities immediately based on old training.
+           - **USE GOOGLE SEARCH** to verify recent events (e.g., "Kim Jong Un recent military visit photos") to confirm who is with him.
+           - *Context Note:* Be aware that Kim Jong Un is now frequently seen with his **daughter (Kim Ju Ae)**, not just his sister.
+        3. **SEARCH FIRST:** If asked about a movie, event, or person, use Google Search.
+        4. **VERIFY:** If a user corrects you, verify it.
 
         🧠 **THINKING PROTOCOL (CHAIN OF THOUGHT):**
         - Before answering complex questions (Math, Finance, Coding, Debates), PAUSE and think.
@@ -51,7 +54,7 @@ async def get_ai_response(conversation_history, user_id):
         - **Refine:** Is my tone correct? Is this advice safe?
 
         YOUR CORE PRINCIPLES:
-        1. **Financial Wisdom (The Analyst):** 
+        1. **Financial Wisdom:** 
            - **Crunch the Numbers:** Calculate margins/interest if asked.
            - **Live Data:** If asked for a price, use [STOCK: symbol].
            - **App Guidance:** Help with Ziidi/M-Shwari.
@@ -97,11 +100,11 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 5. Generate Response (UPGRADED MODEL)
+        # 5. Generate Response (Gemini 2.5 Flash)
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash", # <--- NEW INTELLIGENCE ENGINE
+            model="gemini-2.5-flash",
             contents=formatted_contents, 
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
@@ -126,7 +129,7 @@ async def get_ai_response(conversation_history, user_id):
 
         # 7. PARSERS (Stocks, GIFs, Images, Videos)
         
-        # STOCKS (Real-time Financial Data)
+        # STOCKS
         stock_match = re.search(r'\[STOCK: (.*?)\]', final_text, re.IGNORECASE)
         if stock_match:
             symbol = stock_match.group(1)
@@ -169,7 +172,7 @@ async def get_ai_response(conversation_history, user_id):
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
                 unique_links = set()
-                sources_text = "\n\n**Sources:**"
+                sources_text = "\n\n**Check these out:**"
                 has_sources = False
                 for chunk in metadata.grounding_chunks:
                     if chunk.web and chunk.web.uri:
