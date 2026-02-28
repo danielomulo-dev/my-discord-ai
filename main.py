@@ -4,7 +4,7 @@ import re
 import asyncio
 import dateparser
 import sys
-import pytz # <--- New Import
+import pytz
 from datetime import datetime
 from flask import Flask
 import discord
@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from ai_brain import get_ai_response
 from web_tools import extract_text_from_url
 from file_tools import extract_text_from_pdf, extract_text_from_docx
+from researcher import perform_deep_research # <--- NEW IMPORT
 from memory import (
     add_message_to_history, 
     get_chat_history, 
@@ -31,7 +32,7 @@ load_dotenv()
 # --- WEB SERVER ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Emily is Online! (EAT Timezone)"
+def home(): return "Emily is Online! (Research, Voice, Memory, & Alarms Active)"
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
@@ -49,7 +50,7 @@ async def on_ready():
         check_reminders_loop.start()
         print("⏰ Reminder loop started (EAT)")
 
-# --- BACKGROUND TASK ---
+# --- BACKGROUND TASK: ALARM CLOCK ---
 @tasks.loop(seconds=60)
 async def check_reminders_loop():
     try:
@@ -62,6 +63,7 @@ async def check_reminders_loop():
     except Exception as e:
         print(f"Loop Error: {e}")
 
+# --- MAIN MESSAGE HANDLER ---
 @client.event
 async def on_message(message):
     if message.author == client.user: return
@@ -133,20 +135,38 @@ async def on_message(message):
         async with message.channel.typing():
             response_text = await get_ai_response(history, user_id)
             
-            # --- CHECK REMINDERS (EAT TIMEZONE FIX) ---
+            # --- CHECK FOR DEEP RESEARCH TAG (NEW!) ---
+            research_match = re.search(r'\[RESEARCH: (.*?)\]', response_text, re.IGNORECASE)
+            if research_match:
+                topic = research_match.group(1)
+                await message.channel.send(f"🕵️‍♀️ *Starting deep research on: {topic}... This might take a minute.*")
+                
+                # Run the agent
+                report = await perform_deep_research(topic)
+                
+                # Save to file
+                filename = f"Report_{topic.replace(' ', '_')[:20]}.txt" # Limit filename length
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(report)
+                
+                # Send the file
+                await message.channel.send(f"✅ **Research Complete!** Here is your report on {topic}:", file=discord.File(filename))
+                
+                # Cleanup
+                os.remove(filename)
+                
+                # Clean the tag
+                response_text = response_text.replace(research_match.group(0), "✅ *Report generated and attached.*")
+
+            # --- CHECK REMINDERS ---
             remind_match = re.search(r'\[REMIND: (.*?) \| (.*?)\]', response_text, re.IGNORECASE)
             if remind_match:
                 time_str = remind_match.group(1)
                 task_str = remind_match.group(2)
                 
-                # Parse with Nairobi Timezone settings
                 real_time = dateparser.parse(
                     time_str, 
-                    settings={
-                        'PREFER_DATES_FROM': 'future',
-                        'TIMEZONE': 'Africa/Nairobi',
-                        'TO_TIMEZONE': 'Africa/Nairobi'
-                    }
+                    settings={'PREFER_DATES_FROM': 'future', 'TIMEZONE': 'Africa/Nairobi', 'TO_TIMEZONE': 'Africa/Nairobi'}
                 )
                 
                 if real_time:
@@ -156,15 +176,17 @@ async def on_message(message):
                 else:
                     response_text = response_text.replace(remind_match.group(0), "❌ *I couldn't understand that time.*")
 
+            # Save AI Response
             add_message_to_history(user_id, "model", [{"text": response_text}])
 
-            # 6. SEND REPLY
+            # 6. SEND TEXT REPLY
             if len(response_text) > 2000:
                 for i in range(0, len(response_text), 2000):
                     await message.channel.send(response_text[i:i+2000])
             else:
                 await message.channel.send(response_text)
             
+            # 7. SEND AUDIO REPLY
             if should_speak:
                 voice_file = await generate_voice_note(response_text)
                 if voice_file:
