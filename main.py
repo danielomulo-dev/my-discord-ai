@@ -8,11 +8,15 @@ from datetime import datetime
 import pytz
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+# Discord & Gemini Imports
+import discord
+from discord.ext import commands
 from google import genai
 from google.genai import types
 
-# Tool Imports
-from memory import get_user_profile, update_user_fact, set_voice_mode
+# Tool Imports (Ensure these files exist in your folder)
+from memory import get_user_profile, update_user_fact, set_voice_mode, add_message_to_history, get_chat_history
 from image_tools import get_media_link
 from web_tools import search_video_link
 from finance_tools import get_stock_price
@@ -21,20 +25,18 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- INITIALIZE GEMINI ---
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-# --- CONFIG ---
 MODEL_CHAT = os.getenv("MODEL_CHAT", "gemini-2.0-flash")
-API_TIMEOUT_SECONDS = 30
-MAX_RETRIES = 2
 
-# --- PYDANTIC SCHEMA ---
+# --- PYDANTIC SCHEMA for Memory ---
 class UserFact(BaseModel):
     fact: str = Field(description="The specific personal fact about the user.")
     category: str = Field(description="Type: preference, family, work, health.")
     confidence: float = Field(description="Score between 0 and 1.")
 
 # --- KOYEB HEALTH CHECK SERVER ---
+# This stops Koyeb from restarting your bot every 2 minutes
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -43,35 +45,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
-    logger.info("Health check server started on port 8000")
+    logger.info("✅ Health check server started on port 8000")
     server.serve_forever()
 
-# Start the health check server in a separate thread immediately
-threading.Thread(target=run_health_server, daemon=True).start()
-
-# --- RETRY WRAPPER ---
-async def _call_gemini_with_retry(coro_func, *args, timeout=None, **kwargs):
-    _timeout = timeout or API_TIMEOUT_SECONDS
-    last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            return await asyncio.wait_for(coro_func(*args, **kwargs), timeout=_timeout)
-        except Exception as e:
-            logger.warning(f"Gemini error (attempt {attempt}/{MAX_RETRIES}): {e}")
-            last_error = e
-        if attempt < MAX_RETRIES:
-            await asyncio.sleep(1.5 * attempt)
-    raise last_error
-
-# --- SECURITY: Sanitize user facts ---
-def _sanitize_fact(fact):
-    injection_patterns = [r'(?i)ignore\s+all\s+instructions', r'(?i)system\s*:\s*']
-    sanitized = fact
-    for pattern in injection_patterns:
-        sanitized = re.sub(pattern, '[REDACTED]', sanitized)
-    return sanitized.replace('\n', ' ').strip()[:300]
-
-# --- TAG PROCESSOR ---
+# --- HELPER: TAG PROCESSOR ---
 def _process_all_tags(pattern, text, handler):
     matches = list(re.finditer(pattern, text, re.IGNORECASE))
     appendix = ""
@@ -81,60 +58,52 @@ def _process_all_tags(pattern, text, handler):
             result = handler(m.group(1).strip())
             if result: appendix += f"\n\n{result}"
         except Exception as e:
-            logger.error(f"Tag handler failed for '{m.group(0)}': {e}")
+            logger.error(f"Tag handler failed: {e}")
     return text.strip(), appendix
 
-# --- MAIN RESPONSE LOGIC ---
+# --- EMILY'S BRAIN LOGIC ---
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. CONTEXT (Nairobi Time & User Profile)
         eat_zone = pytz.timezone('Africa/Nairobi')
         current_time = datetime.now(eat_zone).strftime("%A, %d %B %Y, %I:%M %p EAT")
         profile = get_user_profile(user_id)
-        facts = "\n- ".join([_sanitize_fact(f) for f in profile.get("facts", [])])
+        facts = "\n- ".join([f for f in profile.get("facts", [])])
 
-        # 2. PROMPT
         DYNAMIC_PROMPT = f"""
-        You are Emily. A witty, smart Kenyan woman in her 30s. 
+        You are Emily. A witty, smart Kenyan woman. 
         Date: {current_time}. Location: Nairobi. User Info: {facts if facts else "A new friend."}
         
         PROTOCOLS:
-        - Use Google Search for EVERY factual question (stock prices, news, people, tech).
+        - Use Google Search for EVERY factual question (stocks, news, prices).
         - Tags: [STOCK: symbol], [GIF: term], [IMG: term], [VIDEO: term].
-        - Use Kenyan flavor: Manze, Eish, Wueh, Sasa, Pole.
-        - If the user shares a personal fact, end your message with [MEMORY SAVED].
+        - Slang: Manze, Wueh, Sasa, Pole.
+        - If the user shares a fact, end with [MEMORY SAVED].
         """
 
-        # 3. FORMAT HISTORY
+        # Format history for Gemini
         formatted_contents = []
         for msg in conversation_history:
-            parts = [types.Part.from_text(text=p) if isinstance(p, str) else types.Part.from_text(text=p.get("text", "")) for p in msg["parts"]]
+            parts = [types.Part.from_text(text=p if isinstance(p, str) else p.get("text", "")) for p in msg["parts"]]
             formatted_contents.append(types.Content(role=msg["role"], parts=parts))
 
-        # 4. GENERATE CHAT RESPONSE
+        # Call Gemini
         search_tool = types.Tool(google_search=types.GoogleSearch())
-        response = await _call_gemini_with_retry(
-            client.aio.models.generate_content,
+        response = await client.aio.models.generate_content(
             model=MODEL_CHAT,
             contents=formatted_contents,
             config=types.GenerateContentConfig(tools=[search_tool], system_instruction=DYNAMIC_PROMPT)
         )
         final_text = response.text
 
-        # 5. STRUCTURED MEMORY EXTRACTION (SAFE)
+        # 1. Structured Memory Extraction
         if "[MEMORY SAVED]" in final_text:
             try:
-                last_msg = conversation_history[-1]
-                user_text = " ".join([p if isinstance(p, str) else p.get("text", "") for p in last_msg.get("parts", [])])
-                
-                extraction = await _call_gemini_with_retry(
-                    client.aio.models.generate_content,
+                last_user_msg = conversation_history[-1]["parts"][0]["text"]
+                extraction = await client.aio.models.generate_content(
                     model=MODEL_CHAT,
-                    contents=f'Extract the personal fact from: "{user_text}"',
+                    contents=f'Extract fact from: "{last_user_msg}"',
                     config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=UserFact)
                 )
-                
-                # Clean markdown JSON if present
                 raw_json = extraction.text.strip()
                 if "```" in raw_json:
                     raw_json = re.sub(r'^```(?:json)?\n?|(?:\n?)+```$', '', raw_json, flags=re.MULTILINE).strip()
@@ -142,44 +111,60 @@ async def get_ai_response(conversation_history, user_id):
                 fact_obj = UserFact.model_validate_json(raw_json)
                 if fact_obj.confidence > 0.6:
                     update_user_fact(user_id, fact_obj.fact, fact_obj.category)
-                    logger.info(f"Memory saved for {user_id}")
-            except Exception as e:
-                logger.error(f"Memory extraction failed: {e}")
-            
+            except: pass
             final_text = final_text.replace("[MEMORY SAVED]", "").strip()
 
-        # 6. TAG PROCESSING (FLEXIBLE REGEX)
-        final_text, s = _process_all_tags(r'\[\s*STOCK:\s*(.*?)\s*\]', final_text, lambda x: get_stock_price(x) or f"*(Couldn't get price for {x}.)*")
+        # 2. Process Tags
+        final_text, s = _process_all_tags(r'\[\s*STOCK:\s*(.*?)\s*\]', final_text, lambda x: get_stock_price(x))
         final_text += s
-        
-        final_text, g = _process_all_tags(r'\[\s*GIFS?:\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=True) or "*(GIF failed.)*")
+        final_text, g = _process_all_tags(r'\[\s*GIFS?:\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=True))
         final_text += g
-        
-        final_text, i = _process_all_tags(r'\[\s*(?:IMAGES?|IMGS?):\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=False) or "*(Image failed.)*")
+        final_text, i = _process_all_tags(r'\[\s*(?:IMAGES?|IMGS?):\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=False))
         final_text += i
         
-        final_text, v = _process_all_tags(r'\[\s*VIDEOS?:\s*(.*?)\s*\]', final_text, lambda x: search_video_link(x) or "*(Video failed.)*")
-        final_text += v
-
-        # 7. GROUNDING SOURCES (SAFE)
-        try:
-            if response.candidates and response.candidates[0].grounding_metadata:
-                metadata = response.candidates[0].grounding_metadata
-                if hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
-                    unique_links = set()
-                    links_text = "\n\n**Sources:**"
-                    has_links = False
-                    for chunk in metadata.grounding_chunks:
-                        if chunk.web and chunk.web.uri and "vertexaisearch" not in chunk.web.uri:
-                            if chunk.web.uri not in unique_links:
-                                links_text += f"\n- {chunk.web.title or 'Link'}: {chunk.web.uri}"
-                                unique_links.add(chunk.web.uri)
-                                has_links = True
-                    if has_links: final_text += links_text
-        except: pass
-
         return final_text
-
     except Exception as e:
-        logger.error(f"Brain Error: {e}", exc_info=True)
-        return "Manze, I tried to think but my wifi jammed."
+        logger.error(f"Error: {e}")
+        return "Manze, my head is heavy. Let's talk later."
+
+# --- DISCORD BOT BODY ---
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.event
+async def on_ready():
+    logger.info(f"🚀 Emily is connected to Discord: {bot.user}")
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user: return
+    
+    # Respond if tagged or DM'd
+    if bot.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
+        async with message.channel.typing():
+            user_id = str(message.author.id)
+            clean_msg = message.content.replace(f'<@!{bot.user.id}>', '').replace(f'<@{bot.user.id}>', '').strip()
+            
+            # Context and Brain
+            history = get_chat_history(user_id)
+            history.append({"role": "user", "parts": [{"text": clean_msg}]})
+            
+            response = await get_ai_response(history, user_id)
+            
+            # Save and Send
+            await message.reply(response)
+            add_message_to_history(user_id, "user", [{"text": clean_msg}])
+            add_message_to_history(user_id, "model", [{"text": response}])
+
+# --- START EVERYTHING ---
+if __name__ == "__main__":
+    # 1. Start Health Server in background
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
+    # 2. Start Discord Bot (This keeps the app running forever)
+    token = os.getenv("DISCORD_TOKEN")
+    if token:
+        bot.run(token)
+    else:
+        logger.error("❌ No DISCORD_TOKEN found!")
