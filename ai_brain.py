@@ -22,9 +22,11 @@ async def get_ai_response(conversation_history, user_id):
         now_eat = datetime.now(eat_zone)
         current_time = now_eat.strftime("%A, %d %B %Y, %I:%M %p EAT")
 
-        # 2. LOAD USER PROFILE
+        # 2. LOAD USER PROFILE (SAFE MODE)
         profile = get_user_profile(user_id)
-        facts = "\n- ".join(profile["facts"])
+        # Use .get("facts", []) so it doesn't crash if the key is missing in MongoDB
+        user_facts_list = profile.get("facts", []) 
+        facts = "\n- ".join(user_facts_list)
         
         # 3. THE MASTER SYSTEM PROMPT
         DYNAMIC_PROMPT = f"""
@@ -62,11 +64,11 @@ async def get_ai_response(conversation_history, user_id):
         6. **Informed Citizen:** Follow news/politics.
 
         YOUR CAPABILITIES:
-        - **Job Scout:** If asked about jobs (e.g. "Full stack jobs in Kenya"), use **Google Search** to find recent listings on LinkedIn, BrighterMonday, or Fuzu. Summarize the pay and requirements.
-        - **Coding & ZIP Files:** You CAN read code! If the user uploads a .zip, the system will unzip it. Analyze the code inside.
-        - **DEEP RESEARCH:** If asked for a "report" or "deep dive", use tag: [RESEARCH: topic].
+        - **Job Scout:** If asked about jobs, search LinkedIn/BrighterMonday.
+        - **Coding & ZIP Files:** You CAN read code! If user uploads a .zip, analyze it.
+        - **DEEP RESEARCH:** If asked for a "report", use tag: [RESEARCH: topic].
         - **Google Search:** USE THIS AGGRESSIVELY.
-        - **Live Stocks:** [STOCK: symbol] (Use 'SCOM' for Safaricom, 'BTC-USD' for Bitcoin).
+        - **Live Stocks:** [STOCK: symbol].
         - **Ears:** Listen to voice notes.
         - **YouTube:** [VIDEO: search term].
         - **ALARM CLOCK:** [REMIND: time | task].
@@ -100,11 +102,11 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 5. Generate Response (Gemini 2.5 Flash)
+        # 5. Generate Response (Switched back to Stable 2.0 Flash)
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
         response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash", # <--- Stable Model
             contents=formatted_contents, 
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
@@ -119,7 +121,7 @@ async def get_ai_response(conversation_history, user_id):
         if "[MEMORY SAVED]" in final_text:
             try:
                 extraction = await client.aio.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-2.0-flash",
                     contents=f"Extract the specific fact about the user from: {conversation_history[-1]}. Return JUST the fact statement."
                 )
                 fact = extraction.text.strip()
@@ -172,7 +174,7 @@ async def get_ai_response(conversation_history, user_id):
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
                 unique_links = set()
-                sources_text = "\n\n**Sources:**"
+                sources_text = "\n\n**Check these out:**"
                 has_sources = False
                 for chunk in metadata.grounding_chunks:
                     if chunk.web and chunk.web.uri:
