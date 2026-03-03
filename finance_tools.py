@@ -17,58 +17,55 @@ NSE_TICKERS = {
     "FIRE", "KENO", "MSC", "EVRD", "WILL",
 }
 
-
 def get_stock_price(symbol):
     """Gets live price for Stocks, Crypto, or Forex."""
     try:
-        symbol = symbol.replace('[', '').replace(']', '').strip().upper()
-        logger.info(f"Checking price for: {symbol}")
-
-        # Auto-detect NSE stocks and add .NR suffix
+        # 1. Clean the symbol
+        symbol = symbol.replace('[', '').replace(']', '').replace('STOCK:', '').strip().upper()
+        
+        # 2. Handle NSE Suffix (.NR)
         lookup = symbol
+        is_nse = False
         if symbol in NSE_TICKERS:
             lookup = f"{symbol}.NR"
-        elif symbol.endswith(".NR") and symbol.replace(".NR", "") in NSE_TICKERS:
-            lookup = symbol
+            is_nse = True
+        elif symbol.endswith(".NR"):
+            is_nse = True
 
+        logger.info(f"Fetching data for: {lookup}")
         ticker = yf.Ticker(lookup)
 
-        # Get price data - try 1d first, fall back to 5d if market closed
-        data = ticker.history(period="1d")
+        # 3. Fast Data Fetch (Only get the last 5 days of history)
+        # Avoid using ticker.info because it is VERY slow and often fails
+        data = ticker.history(period="5d")
+        
         if data.empty:
-            data = ticker.history(period="5d")
+            logger.warning(f"No price data found for {lookup}")
+            return f"*(Manze, I couldn't find live prices for {symbol} right now.)*"
 
-        if data.empty:
-            logger.warning(f"No data for {lookup}")
-            return None
-
+        # Get the latest close and the previous close for change calculation
         price = data['Close'].iloc[-1]
         
-        # Try to get extra info, but don't crash if it fails
-        currency = "KES" if lookup.endswith(".NR") else "USD"
+        # 4. Logic for NSE vs Global Currencies
+        currency = "KES" if is_nse else "USD"
+        
+        # 5. Calculate Performance
         try:
-            info = ticker.info
-            if info:
-                currency = info.get('currency', currency)
-        except Exception:
-            pass  # info call failed, use default currency
-
-        # Build response - try enriched, fall back to simple
-        try:
-            open_price = data['Open'].iloc[-1]
-            high = data['High'].iloc[-1]
-            low = data['Low'].iloc[-1]
-            change = price - open_price
-            change_pct = (change / open_price * 100) if open_price else 0
+            # We use the previous day's close for a more accurate 'Daily Change'
+            prev_close = data['Close'].iloc[-2] if len(data) > 1 else data['Open'].iloc[-1]
+            change = price - prev_close
+            change_pct = (change / prev_close * 100)
+            
             arrow = "🟢" if change >= 0 else "🔴"
+            sign = "+" if change >= 0 else ""
 
             return (
-                f"📈 **{symbol} Price:** {price:,.2f} {currency}\n"
-                f"{arrow} Change: {change:+,.2f} ({change_pct:+.2f}%)\n"
-                f"📊 High: {high:,.2f} | Low: {low:,.2f}"
+                f"📈 **{symbol} (NSE)**\n" if is_nse else f"📈 **{symbol}**\n"
+                f"**Price:** {price:,.2f} {currency}\n"
+                f"{arrow} Change: {sign}{change:,.2f} ({sign}{change_pct:.2f}%)"
             )
-        except Exception:
-            # Fallback: just price (mirrors old working behavior)
+        except Exception as e:
+            # Fallback for simple price if math fails
             return f"📈 **{symbol} Price:** {price:,.2f} {currency}"
 
     except Exception as e:
