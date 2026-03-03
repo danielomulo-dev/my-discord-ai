@@ -114,6 +114,36 @@ async def _send_long(channel, text: str):
             await channel.send(chunk)
 
 
+def _clean_for_discord(text: str) -> str:
+    """Clean AI response for Discord display.
+    
+    - Strips markdown links [title](url) → bare URL (Discord auto-embeds bare URLs
+      into nice preview cards, but renders markdown links as ugly literal text)
+    - Removes Google Vertex redirect URLs (unreadable garbage links)
+    - Deduplicates source links
+    """
+    # 1. Remove vertex redirect URLs entirely (they're unreadable and useless to users)
+    text = re.sub(
+        r'👉\s*\[.*?\]\(https://vertexaisearch\.cloud\.google\.com/.*?\)\n?',
+        '', text
+    )
+    text = re.sub(
+        r'https://vertexaisearch\.cloud\.google\.com/\S+',
+        '', text
+    )
+
+    # 2. Strip remaining markdown links to bare URLs (Discord auto-previews these)
+    text = re.sub(r'\[([^\]]*)\]\((https?://\S+?)\)', r'\2', text)
+
+    # 3. Clean up any leftover empty source sections
+    text = re.sub(r'\*\*Check these out:\*\*\s*\n*$', '', text.strip())
+    
+    # 4. Clean up excessive blank lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text.strip()
+
+
 # --- MAIN MESSAGE HANDLER ---
 @client.event
 async def on_message(message):
@@ -258,8 +288,11 @@ async def on_message(message):
             # 8. SAVE & SEND
             add_message_to_history(user_id, "model", [{"text": response_text}])
 
-            if response_text.strip():
-                await _send_long(message.channel, response_text)
+            # Clean up links for Discord (strip markdown, remove vertex redirects)
+            discord_text = _clean_for_discord(response_text)
+
+            if discord_text.strip():
+                await _send_long(message.channel, discord_text)
             
             # 9. VOICE NOTE
             if should_speak:

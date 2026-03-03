@@ -74,9 +74,12 @@ def _process_all_tags(pattern: str, text: str, handler):
     appendix = ""
     for m in matches:
         text = text.replace(m.group(0), "")
-        result = handler(m.group(1))
-        if result:
-            appendix += f"\n\n{result}"
+        try:
+            result = handler(m.group(1))
+            if result:
+                appendix += f"\n\n{result}"
+        except Exception as e:
+            logger.error(f"Tag handler failed for '{m.group(0)}': {e}")
     return text.strip(), appendix
 
 
@@ -109,8 +112,10 @@ async def get_ai_response(conversation_history, user_id):
 
         🚨 **TRUTH PROTOCOL:**
         1. **NO HALLUCINATIONS:** If you don't know, SEARCH.
-        2. **SEARCH FIRST:** If asked about a movie/event, use Google Search.
+        2. **SEARCH FIRST:** For ANY factual question (finance, companies, news, movies, events, people, prices), ALWAYS use Google Search. Do NOT guess.
         3. **VERIFY:** If a user corrects you, verify it.
+        4. **NEVER REDIRECT:** Do NOT tell the user to "go check a website" or "look it up yourself." YOU do the research, YOU provide the data. If you have search access, USE IT. The user is asking YOU because they want YOU to find the answer.
+        5. **BE SPECIFIC:** Always include real numbers, dates, percentages, and names in your answers. Vague answers are unacceptable when search is available.
 
         🧠 **THINKING PROTOCOL (CHAIN OF THOUGHT):**
         - Before answering complex questions (Math, Finance, Coding, Debates), PAUSE and think.
@@ -123,23 +128,30 @@ async def get_ai_response(conversation_history, user_id):
            - **Crunch the Numbers:** Calculate margins/interest if asked.
            - **Live Data:** If asked for a price, use [STOCK: symbol].
            - **App Guidance:** Help with Ziidi/M-Shwari.
+           - **DO THE WORK:** When asked about stocks, companies, or investments, SEARCH for the latest data (revenue, returns, P/E ratios) and present YOUR analysis with specific numbers. Never just list company names — always include the WHY backed by data.
         2. **Honesty:** Don't lie.
         3. **Hard Work:** Respect hustle.
         4. **Kenyan Pride:** Defend Kenyan culture.
         5. **Culinary Enthusiast:** Love food.
         6. **Informed Citizen:** Follow news/politics.
 
-        YOUR CAPABILITIES:
+        YOUR CAPABILITIES (FUNCTIONAL TAGS):
+        These tags are REAL ACTIONS. When you include them in your response, the system 
+        automatically processes them and delivers the result to the user. You ARE able to 
+        share images, GIFs, videos, stock prices, etc. — just use the tag and it happens.
+        NEVER say "I can't show you" — you CAN, by using the tag.
+
         - **Job Scout:** If asked about jobs, search LinkedIn/BrighterMonday.
         - **Coding & ZIP Files:** You CAN read code! If user uploads a .zip, analyze it.
-        - **DEEP RESEARCH:** If asked for a "report", use tag: [RESEARCH: topic].
-        - **Google Search:** USE THIS AGGRESSIVELY.
-        - **Live Stocks:** [STOCK: symbol].
-        - **Ears:** Listen to voice notes.
-        - **YouTube:** [VIDEO: search term].
-        - **ALARM CLOCK:** [REMIND: time | task].
-        - **GIFs/Images:** [GIF: search term] or [IMG: search term].
-        - **Documents:** Read PDFs/Word docs.
+        - **DEEP RESEARCH:** If asked for a "report", output: [RESEARCH: topic] — a full report will be generated and sent as a file.
+        - **Google Search:** USE THIS AGGRESSIVELY for EVERY factual question. When in doubt, SEARCH.
+        - **Live Stocks:** Output [STOCK: SCOM] — real-time price data will be fetched and displayed.
+        - **Ears:** You CAN listen to voice notes and audio files.
+        - **YouTube:** Output [VIDEO: search term] — a YouTube link will be found and shared.
+        - **ALARM CLOCK:** Output [REMIND: time | task] — a real reminder will be set.
+        - **GIFs:** Output [GIF: search term] — a real GIF will be found and sent.
+        - **Images:** Output [IMG: search term] — a real image will be found and sent. USE THIS when the user asks to see something. Just include the tag directly, do NOT describe what to search for.
+        - **Documents:** You CAN read PDFs, Word docs, and ZIP files.
 
         YOUR VIBE:
         - **Adaptability:** Read the room!
@@ -223,28 +235,30 @@ async def get_ai_response(conversation_history, user_id):
         final_text, stock_extra = _process_all_tags(r'\[STOCK: (.*?)\]', final_text, _handle_stock)
         final_text += stock_extra
 
-        # GIFS
+        # GIFS — catch [GIF: ...] and [GIFS: ...] 
         def _handle_gif(query):
             url = get_media_link(query, is_gif=True)
             return url or "*(I tried to find a GIF, but the search failed. 😔)*"
 
-        final_text, gif_extra = _process_all_tags(r'\[GIF: (.*?)\]', final_text, _handle_gif)
+        final_text, gif_extra = _process_all_tags(r'\[GIFS?: (.*?)\]', final_text, _handle_gif)
         final_text += gif_extra
 
-        # IMAGES
+        # IMAGES — catch [IMG: ...], [IMAGE: ...], [IMAGES: ...] variations
         def _handle_img(query):
             url = get_media_link(query, is_gif=False)
             return url or "*(I tried to find an image, but the search failed. 😔)*"
 
-        final_text, img_extra = _process_all_tags(r'\[IMG: (.*?)\]', final_text, _handle_img)
+        final_text, img_extra = _process_all_tags(r'\[IMAGES?: (.*?)\]', final_text, _handle_img)
         final_text += img_extra
+        final_text, img_extra2 = _process_all_tags(r'\[IMG: (.*?)\]', final_text, _handle_img)
+        final_text += img_extra2
 
-        # VIDEO
+        # VIDEO — catch [VIDEO: ...] and [VIDEOS: ...]
         def _handle_video(query):
             url = search_video_link(query)
             return url or "*(I tried to find a video, but the search failed.)*"
 
-        final_text, vid_extra = _process_all_tags(r'\[VIDEO: (.*?)\]', final_text, _handle_video)
+        final_text, vid_extra = _process_all_tags(r'\[VIDEOS?: (.*?)\]', final_text, _handle_video)
         final_text += vid_extra
 
         # 8. CLEAN UP LINKS
@@ -258,14 +272,17 @@ async def get_ai_response(conversation_history, user_id):
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
                 unique_links = set()
-                sources_text = "\n\n**Check these out:**"
+                sources_text = "\n\n**Sources:**"
                 has_sources = False
                 for chunk in metadata.grounding_chunks:
                     if chunk.web and chunk.web.uri:
                         url = chunk.web.uri
                         title = chunk.web.title if chunk.web.title else "Link"
+                        # Skip Google's vertex redirect URLs (unreadable)
+                        if "vertexaisearch.cloud.google.com" in url:
+                            continue
                         if url not in unique_links:
-                            sources_text += f"\n👉 [{title}]({url})"
+                            sources_text += f"\n👉 {title}: {url}"
                             unique_links.add(url)
                             has_sources = True
                 if has_sources:
@@ -276,3 +293,4 @@ async def get_ai_response(conversation_history, user_id):
     except Exception as e:
         logger.error(f"Brain Error: {e}", exc_info=True)
         return "Manze, I tried to think but my wifi jammed. 😵‍💫"
+
