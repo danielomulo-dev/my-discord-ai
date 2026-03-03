@@ -1,32 +1,58 @@
+import logging
 import requests
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import urlparse, parse_qs
 from duckduckgo_search import DDGS
 
+logger = logging.getLogger(__name__)
+
+# Default cap for chat context (keeps brain.py token-efficient)
+DEFAULT_MAX_CHARS = 3000
+# Research mode gets more text per source
+RESEARCH_MAX_CHARS = 15000
+
+
 def get_search_results(query, max_results=3):
     """Searches DuckDuckGo and returns a list of URLs."""
     try:
-        print(f"🔎 Deep Researching: {query}")
+        logger.info(f"Searching: {query}")
         with DDGS() as ddgs:
             results = list(ddgs.text(query, region="wt-wt", safesearch="moderate", max_results=max_results))
             urls = [r['href'] for r in results]
             return urls
     except Exception as e:
-        print(f"❌ Search Error: {e}")
+        logger.error(f"Search error: {e}")
         return []
 
-def extract_text_from_url(url):
-    """Decides if the URL is a website or a YouTube video."""
-    if "youtube.com" in url or "youtu.be" in url:
-        return get_youtube_transcript(url)
-    else:
-        return get_website_content(url)
 
-def get_website_content(url):
+def extract_text_from_url(url, max_chars=None):
+    """Decides if the URL is a website or a YouTube video.
+    
+    Args:
+        url: The URL to extract text from.
+        max_chars: Override the character limit per source.
+                   Defaults to DEFAULT_MAX_CHARS (3000) for chat,
+                   pass RESEARCH_MAX_CHARS (15000) for deep research.
+    """
+    _max = max_chars or DEFAULT_MAX_CHARS
+    if "youtube.com" in url or "youtu.be" in url:
+        return get_youtube_transcript(url, max_chars=_max)
+    else:
+        return get_website_content(url, max_chars=_max)
+
+
+def get_website_content(url, max_chars=None):
+    """Scrape a webpage and return cleaned text.
+    
+    Args:
+        max_chars: Character limit for the extracted text.
+                   Defaults to DEFAULT_MAX_CHARS (3000).
+    """
+    _max = max_chars or DEFAULT_MAX_CHARS
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=5) # 5s timeout to be fast
+        response = requests.get(url, headers=headers, timeout=10)
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
@@ -41,12 +67,15 @@ def get_website_content(url):
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = '\n'.join(chunk for chunk in chunks if chunk)
         
-        # Limit text to 3000 chars per site to save tokens
-        return f"\n\n--- SOURCE: {url} ---\n{text[:3000]}..."
+        return f"\n\n--- SOURCE: {url} ---\n{text[:_max]}..."
     except Exception as e:
+        logger.warning(f"Could not read {url}: {e}")
         return f"\n[Could not read {url}: {e}]"
 
-def get_youtube_transcript(url):
+
+def get_youtube_transcript(url, max_chars=None):
+    """Extract transcript from a YouTube video."""
+    _max = max_chars or DEFAULT_MAX_CHARS
     try:
         video_id = None
         if "youtu.be" in url: video_id = url.split("/")[-1]
@@ -54,8 +83,11 @@ def get_youtube_transcript(url):
         if not video_id: return ""
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
         full_text = " ".join([t['text'] for t in transcript_list])
-        return f"\n\n--- VIDEO TRANSCRIPT: {url} ---\n{full_text[:3000]}..."
-    except: return ""
+        return f"\n\n--- VIDEO TRANSCRIPT: {url} ---\n{full_text[:_max]}..."
+    except Exception as e:
+        logger.warning(f"Could not get transcript for {url}: {e}")
+        return ""
+
 
 def search_video_link(query):
     """Finds a specific YouTube video link."""
@@ -64,4 +96,6 @@ def search_video_link(query):
             results = list(ddgs.videos(keywords=f"site:youtube.com {query}", max_results=1))
             if results: return results[0]['content']
             return None
-    except: return None
+    except Exception as e:
+        logger.warning(f"Video search failed: {e}")
+        return None

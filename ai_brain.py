@@ -1,5 +1,7 @@
 import os
 import re
+import asyncio
+import logging
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -9,11 +11,75 @@ from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
 from web_tools import search_video_link
 from finance_tools import get_stock_price
+from research import perform_deep_research
 
 # Load environment variables
 load_dotenv()
 
+# --- Improvement #1: Proper logging instead of silent failures ---
+logger = logging.getLogger(__name__)
+
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# ─── MODEL CONFIGURATION ─────────────────────────────────────────────────────
+MODEL_CHAT = os.getenv("MODEL_CHAT", "gemini-2.0-flash")
+
+API_TIMEOUT_SECONDS = 30
+MAX_RETRIES = 2
+
+async def _call_gemini_with_retry(coro_func, *args, timeout=None, **kwargs):
+    """Wraps a Gemini API call with timeout and retry logic."""
+    _timeout = timeout or API_TIMEOUT_SECONDS
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return await asyncio.wait_for(
+                coro_func(*args, **kwargs),
+                timeout=_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Gemini API call timed out (attempt {attempt}/{MAX_RETRIES})")
+            last_error = TimeoutError("Gemini API call timed out")
+        except Exception as e:
+            logger.warning(f"Gemini API error (attempt {attempt}/{MAX_RETRIES}): {e}")
+            last_error = e
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(1.5 * attempt)  # simple backoff
+    raise last_error
+
+
+# --- Improvement #6: Sanitize user facts before injecting into the prompt ---
+def _sanitize_fact(fact: str) -> str:
+    """Strip anything that looks like a prompt injection from a stored fact."""
+    # Remove lines that try to override instructions
+    injection_patterns = [
+        r'(?i)ignore\s+(all\s+)?(previous\s+)?instructions',
+        r'(?i)you\s+are\s+now',
+        r'(?i)system\s*:\s*',
+        r'(?i)new\s+instructions?\s*:',
+        r'(?i)override\s+prompt',
+    ]
+    sanitized = fact
+    for pattern in injection_patterns:
+        sanitized = re.sub(pattern, '[REDACTED]', sanitized)
+    # Collapse to a single line and cap length
+    sanitized = sanitized.replace('\n', ' ').strip()
+    return sanitized[:300]
+
+
+# --- Improvement #2: Process ALL matches for a tag type, not just the first ---
+def _process_all_tags(pattern: str, text: str, handler):
+    """Find every occurrence of `pattern` in `text`, call handler(match_value)
+    for each, and replace the tag with the handler's result string."""
+    matches = list(re.finditer(pattern, text, re.IGNORECASE))
+    appendix = ""
+    for m in matches:
+        text = text.replace(m.group(0), "")
+        result = handler(m.group(1))
+        if result:
+            appendix += f"\n\n{result}"
+    return text.strip(), appendix
+
 
 async def get_ai_response(conversation_history, user_id):
     try:
@@ -24,10 +90,11 @@ async def get_ai_response(conversation_history, user_id):
 
         # 2. LOAD USER PROFILE (SAFE MODE)
         profile = get_user_profile(user_id)
-        # Use .get("facts", []) so it doesn't crash if the key is missing in MongoDB
-        user_facts_list = profile.get("facts", []) 
-        facts = "\n- ".join(user_facts_list)
-        
+        user_facts_list = profile.get("facts", [])
+        # Improvement #6: sanitize each fact
+        safe_facts = [_sanitize_fact(f) for f in user_facts_list]
+        facts = "\n- ".join(safe_facts)
+
         # 3. THE MASTER SYSTEM PROMPT
         DYNAMIC_PROMPT = f"""
         You are Emily. You are a smart, witty, and opinionated Kenyan woman in her 30s.
@@ -102,74 +169,101 @@ async def get_ai_response(conversation_history, user_id):
             if message_parts:
                 formatted_contents.append(types.Content(role=message["role"], parts=message_parts))
 
-        # 5. Generate Response (Switched back to Stable 2.0 Flash)
+        # 5. Generate Response with timeout & retry (Improvement #4)
         google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
-        response = await client.aio.models.generate_content(
-            model="gemini-2.0-flash", # <--- Stable Model
-            contents=formatted_contents, 
+        response = await _call_gemini_with_retry(
+            client.aio.models.generate_content,
+            model=MODEL_CHAT,
+            contents=formatted_contents,
             config=types.GenerateContentConfig(
                 tools=[google_search_tool],
                 system_instruction=DYNAMIC_PROMPT,
                 response_modalities=["TEXT"]
             )
         )
-        
+
         final_text = response.text
 
-        # 6. MEMORY SAVE
+        # 6. MEMORY SAVE — Improvement #1 (log errors) & #3 (extract text properly)
         if "[MEMORY SAVED]" in final_text:
             try:
-                extraction = await client.aio.models.generate_content(
-                    model="gemini-2.0-flash",
-                    contents=f"Extract the specific fact about the user from: {conversation_history[-1]}. Return JUST the fact statement."
+                # Improvement #3: serialize only the text content, not the raw dict
+                last_msg = conversation_history[-1]
+                user_text_parts = []
+                for part in last_msg.get("parts", []):
+                    if isinstance(part, str):
+                        user_text_parts.append(part)
+                    elif isinstance(part, dict) and "text" in part:
+                        user_text_parts.append(part["text"])
+                user_text = " ".join(user_text_parts) if user_text_parts else str(last_msg)
+
+                extraction = await _call_gemini_with_retry(
+                    client.aio.models.generate_content,
+                    model=MODEL_CHAT,
+                    contents=f"Extract the specific personal fact about the user from: \"{user_text}\". Return JUST the fact statement, nothing else."
                 )
                 fact = extraction.text.strip()
-                update_user_fact(user_id, fact)
-            except: pass
+                if fact:
+                    update_user_fact(user_id, fact)
+                    logger.info(f"Memory saved for user {user_id}: {fact[:80]}")
+            except Exception as e:
+                # Improvement #1: never silently swallow errors
+                logger.error(f"Memory save failed for user {user_id}: {e}")
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 7. PARSERS (Stocks, GIFs, Images, Videos)
-        
+        # 7. RESEARCH — Hybrid model routing via research.py (async)
+        research_matches = list(re.finditer(r'\[RESEARCH: (.*?)\]', final_text, re.IGNORECASE))
+        if research_matches:
+            for m in research_matches:
+                topic = m.group(1)
+                final_text = final_text.replace(m.group(0), "").strip()
+                report = await perform_deep_research(topic)
+                final_text += f"\n\n{report}"
+
+        # 8. PARSERS — Improvement #2: handle ALL occurrences of each tag
+
         # STOCKS
-        stock_match = re.search(r'\[STOCK: (.*?)\]', final_text, re.IGNORECASE)
-        if stock_match:
-            symbol = stock_match.group(1)
-            final_text = final_text.replace(stock_match.group(0), "").strip()
-            stock_data = get_stock_price(symbol)
-            if stock_data: final_text += f"\n\n{stock_data}"
-            else: final_text += f"\n*(I tried to check the price for {symbol}, but the market data is unavailable.)*"
+        def _handle_stock(symbol):
+            data = get_stock_price(symbol)
+            if data:
+                return data
+            return f"*(I tried to check the price for {symbol}, but the market data is unavailable.)*"
+
+        final_text, stock_extra = _process_all_tags(r'\[STOCK: (.*?)\]', final_text, _handle_stock)
+        final_text += stock_extra
 
         # GIFS
-        gif_match = re.search(r'\[GIF: (.*?)\]', final_text, re.IGNORECASE)
-        if gif_match:
-            query = gif_match.group(1)
-            final_text = final_text.replace(gif_match.group(0), "").strip()
+        def _handle_gif(query):
             url = get_media_link(query, is_gif=True)
-            if url: final_text += f"\n\n{url}"
-            else: final_text += "\n*(I tried to find a GIF, but the search failed. 😔)*"
+            return url or "*(I tried to find a GIF, but the search failed. 😔)*"
+
+        final_text, gif_extra = _process_all_tags(r'\[GIF: (.*?)\]', final_text, _handle_gif)
+        final_text += gif_extra
 
         # IMAGES
-        img_match = re.search(r'\[IMG: (.*?)\]', final_text, re.IGNORECASE)
-        if img_match:
-            query = img_match.group(1)
-            final_text = final_text.replace(img_match.group(0), "").strip()
+        def _handle_img(query):
             url = get_media_link(query, is_gif=False)
-            if url: final_text += f"\n\n{url}"
-            else: final_text += "\n*(I tried to find an image, but the search failed. 😔)*"
+            return url or "*(I tried to find an image, but the search failed. 😔)*"
+
+        final_text, img_extra = _process_all_tags(r'\[IMG: (.*?)\]', final_text, _handle_img)
+        final_text += img_extra
 
         # VIDEO
-        vid_match = re.search(r'\[VIDEO: (.*?)\]', final_text, re.IGNORECASE)
-        if vid_match:
-            query = vid_match.group(1)
-            final_text = final_text.replace(vid_match.group(0), "").strip()
+        def _handle_video(query):
             url = search_video_link(query)
-            if url: final_text += f"\n\n{url}"
-            else: final_text += "\n*(I tried to find a video, but the search failed.)*"
+            return url or "*(I tried to find a video, but the search failed.)*"
 
-        # 8. CLEAN UP LINKS
-        final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text)
-        
+        final_text, vid_extra = _process_all_tags(r'\[VIDEO: (.*?)\]', final_text, _handle_video)
+        final_text += vid_extra
+
+        # 9. CLEAN UP LINKS
+        # Improvement #5: keep markdown links intact for web UIs; only strip for
+        # plain-text channels. Default to keeping them. Set STRIP_MD_LINKS=1 in env
+        # (e.g., for WhatsApp) to reduce to bare URLs.
+        if os.getenv("STRIP_MD_LINKS", "0") == "1":
+            final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text)
+
         if response.candidates and response.candidates[0].grounding_metadata:
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
@@ -190,5 +284,5 @@ async def get_ai_response(conversation_history, user_id):
         return final_text
 
     except Exception as e:
-        print(f"Brain Error: {e}")
+        logger.error(f"Brain Error: {e}", exc_info=True)
         return "Manze, I tried to think but my wifi jammed. 😵‍💫"
