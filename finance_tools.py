@@ -1,93 +1,50 @@
-import logging
 import yfinance as yf
 
-logger = logging.getLogger(__name__)
-
-# ─── NSE (Nairobi Securities Exchange) Tickers ───────────────────────────────
-# Yahoo Finance uses .NR suffix for Nairobi-listed stocks.
-# This set covers all actively traded NSE tickers so the AI can just say
-# [STOCK: SCOM] without needing to know about the .NR suffix.
-NSE_TICKERS = {
-    # Banking & Finance
-    "SCOM", "KCB", "EQTY", "COOP", "ABSA", "SBIC", "NCBA", "DTB", "IMH", "BKG",
-    "HF", "CIC", "BRIT", "JUB", "LKN", "KNRE",
-    # Manufacturing & Industry
-    "EABL", "BAT", "BOC", "CARB", "BAMB", "ARM", "CRG",
-    # Energy & Petroleum
-    "KEGN", "KPLC", "TOTAL", "UMME",
-    # Telecom & Tech
-    "SCOM", "AIRTEL",
-    # Investment & Holding
-    "CTUM", "BRIT", "ICDC", "OCH", "KURV",
-    # Agriculture
-    "SASN", "KUKZ", "LIMT", "WTK", "REA", "EGAD", "KAPC",
-    # Real Estate & Construction
-    "HOME", "KURV",
-    # Insurance
-    "CIC", "JUB", "LKN", "BRIT", "KNRE",
-    # Retail & Services
-    "UCHM", "SGL", "NMG", "TPS", "SCAN", "HAFR",
-    # Other common
-    "FIRE", "KENO", "MSC", "EVRD", "WILL",
-}
-
-
 def get_stock_price(symbol):
-    """Gets live price for Stocks, Crypto, or Forex.
-    
-    Supports:
-    - Kenyan stocks: SCOM, KCB, EQTY, etc. (auto-adds .NR suffix)
-    - US stocks: AAPL, MSFT, TSLA, etc.
-    - Crypto: BTC-USD, ETH-USD
-    - Forex: USDKES=X, EURUSD=X
-    """
+    """Gets live price for Stocks, Crypto, or Forex."""
     try:
         # Clean the symbol
         symbol = symbol.replace('[', '').replace(']', '').strip().upper()
+        print(f"📈 Checking price for: {symbol}")
+
+        # List of variations to try for Kenyan stocks
+        # Yahoo Finance uses .NR for Nairobi
+        tickers_to_try = [symbol]
         
-        logger.info(f"Checking price for: {symbol}")
+        # If it looks like a Kenyan stock (short name), add .NR
+        if len(symbol) < 5 and "." not in symbol:
+            tickers_to_try.insert(0, f"{symbol}.NR") # Try .NR first
 
-        # Auto-detect NSE stocks and add .NR suffix
-        # Handles both "SCOM" and "SCOM.NR" (don't double-suffix)
-        lookup = symbol
-        if symbol in NSE_TICKERS:
-            lookup = f"{symbol}.NR"
-        elif symbol.replace(".NR", "") in NSE_TICKERS:
-            lookup = symbol  # already has .NR
+        for ticker_name in tickers_to_try:
+            try:
+                ticker = yf.Ticker(ticker_name)
+                
+                # Try getting 1 day history
+                # 'fast_info' is sometimes faster/more reliable than 'history'
+                price = None
+                currency = "USD"
+                
+                # Method A: Fast Info (Newer yfinance)
+                if hasattr(ticker, 'fast_info') and 'last_price' in ticker.fast_info:
+                    price = ticker.fast_info['last_price']
+                    currency = ticker.fast_info.get('currency', 'KES' if '.NR' in ticker_name else 'USD')
+                
+                # Method B: History (Fallback)
+                if price is None:
+                    data = ticker.history(period="1d")
+                    if not data.empty:
+                        price = data['Close'].iloc[-1]
+                        currency = ticker.info.get('currency', 'KES')
 
-        ticker = yf.Ticker(lookup)
-        
-        # Try 1d first, fall back to 5d if market is closed
-        data = ticker.history(period="1d")
-        if data.empty:
-            data = ticker.history(period="5d")
+                if price is not None:
+                    return f"📈 **{ticker_name} Price:** {price:,.2f} {currency}"
+            
+            except Exception as e:
+                print(f"Failed to fetch {ticker_name}: {e}")
+                continue # Try next variation
 
-        if not data.empty:
-            price = data['Close'].iloc[-1]
-            open_price = data['Open'].iloc[-1]
-            high = data['High'].iloc[-1]
-            low = data['Low'].iloc[-1]
-
-            # Get currency and name
-            info = ticker.info or {}
-            currency = info.get('currency', 'KES' if lookup.endswith('.NR') else 'USD')
-            name = info.get('shortName', symbol)
-
-            # Calculate daily change
-            change = price - open_price
-            change_pct = (change / open_price * 100) if open_price else 0
-            arrow = "🟢" if change >= 0 else "🔴"
-
-            return (
-                f"📈 **{name}** ({symbol})\n"
-                f"💰 Price: **{price:,.2f} {currency}**\n"
-                f"{arrow} Change: {change:+,.2f} ({change_pct:+.2f}%)\n"
-                f"📊 High: {high:,.2f} | Low: {low:,.2f}"
-            )
-        else:
-            logger.warning(f"No data returned for {lookup}")
-            return None
+        return f"*(I tried to check {symbol}, but the market data is unavailable right now.)*"
 
     except Exception as e:
-        logger.error(f"Stock error for {symbol}: {e}")
+        print(f"❌ Stock Error: {e}")
         return None

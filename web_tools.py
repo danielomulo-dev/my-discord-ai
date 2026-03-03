@@ -7,95 +7,81 @@ from duckduckgo_search import DDGS
 
 logger = logging.getLogger(__name__)
 
-# Default cap for chat context (keeps brain.py token-efficient)
-DEFAULT_MAX_CHARS = 3000
-# Research mode gets more text per source
-RESEARCH_MAX_CHARS = 15000
-
-
-def get_search_results(query, max_results=3):
-    """Searches DuckDuckGo and returns a list of URLs."""
+# --- NEWS SEARCH (NEW) ---
+def get_latest_news(topic, max_results=5):
+    """Searches DuckDuckGo News for the latest headlines."""
     try:
-        logger.info(f"Searching: {query}")
+        logger.info(f"Fetching news for: {topic}")
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, region="wt-wt", safesearch="moderate", max_results=max_results))
-            urls = [r['href'] for r in results]
-            return urls
+            # 'news' search returns titles, snippets, source, and date
+            results = list(ddgs.news(
+                keywords=topic,
+                region="wt-wt",
+                safesearch="moderate",
+                max_results=max_results
+            ))
+            
+            if not results:
+                return None
+
+            news_summary = f"📰 **Latest News: {topic}**\n"
+            for r in results:
+                title = r.get('title', 'No Title')
+                source = r.get('source', 'Unknown')
+                date = r.get('date', '')
+                url = r.get('url', '#')
+                # Format: • Title - Source (Date)
+                news_summary += f"• [{title}]({url}) - *{source}* ({date})\n"
+            
+            return news_summary
+
     except Exception as e:
-        logger.error(f"Search error: {e}")
-        return []
+        logger.error(f"News search error: {e}")
+        return None
 
-
-def extract_text_from_url(url, max_chars=None):
-    """Decides if the URL is a website or a YouTube video.
-    
-    Args:
-        url: The URL to extract text from.
-        max_chars: Override the character limit per source.
-                   Defaults to DEFAULT_MAX_CHARS (3000) for chat,
-                   pass RESEARCH_MAX_CHARS (15000) for deep research.
-    """
-    _max = max_chars or DEFAULT_MAX_CHARS
+# --- WEB SCRAPING ---
+def extract_text_from_url(url, max_chars=3000):
     if "youtube.com" in url or "youtu.be" in url:
-        return get_youtube_transcript(url, max_chars=_max)
+        return get_youtube_transcript(url, max_chars)
     else:
-        return get_website_content(url, max_chars=_max)
+        return get_website_content(url, max_chars)
 
-
-def get_website_content(url, max_chars=None):
-    """Scrape a webpage and return cleaned text.
-    
-    Args:
-        max_chars: Character limit for the extracted text.
-                   Defaults to DEFAULT_MAX_CHARS (3000).
-    """
-    _max = max_chars or DEFAULT_MAX_CHARS
+def get_website_content(url, max_chars=3000):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, headers=headers, timeout=10)
-        
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Remove junk (scripts, styles, navbars)
-        for script in soup(["script", "style", "nav", "footer", "header"]):
+        for script in soup(["script", "style", "nav", "footer"]):
             script.extract()    
-            
         text = soup.get_text()
-        
-        # Clean up whitespace
         lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-        
-        return f"\n\n--- SOURCE: {url} ---\n{text[:_max]}..."
+        text = '\n'.join(chunk for chunk in lines if chunk)
+        return f"\n\n--- SOURCE: {url} ---\n{text[:max_chars]}..."
     except Exception as e:
-        logger.warning(f"Could not read {url}: {e}")
-        return f"\n[Could not read {url}: {e}]"
+        return f"\n[Error reading {url}: {e}]"
 
-
-def get_youtube_transcript(url, max_chars=None):
-    """Extract transcript from a YouTube video."""
-    _max = max_chars or DEFAULT_MAX_CHARS
+def get_youtube_transcript(url, max_chars=3000):
     try:
         video_id = None
         if "youtu.be" in url: video_id = url.split("/")[-1]
         elif "v=" in url: video_id = parse_qs(urlparse(url).query)['v'][0]
         if not video_id: return ""
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-        full_text = " ".join([t['text'] for t in transcript_list])
-        return f"\n\n--- VIDEO TRANSCRIPT: {url} ---\n{full_text[:_max]}..."
-    except Exception as e:
-        logger.warning(f"Could not get transcript for {url}: {e}")
-        return ""
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        text = " ".join([t['text'] for t in transcript])
+        return f"\n\n--- VIDEO TRANSCRIPT: {url} ---\n{text[:max_chars]}..."
+    except: return ""
 
-
-def search_video_link(query):
-    """Finds a specific YouTube video link."""
+def get_search_results(query, max_results=3):
     try:
         with DDGS() as ddgs:
-            results = list(ddgs.videos(keywords=f"site:youtube.com {query}", max_results=1))
+            results = list(ddgs.text(query, max_results=max_results))
+            return [r['href'] for r in results]
+    except: return []
+
+def search_video_link(query):
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.videos(f"site:youtube.com {query}", max_results=1))
             if results: return results[0]['content']
             return None
-    except Exception as e:
-        logger.warning(f"Video search failed: {e}")
-        return None
+    except: return None
