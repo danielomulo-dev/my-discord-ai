@@ -7,10 +7,43 @@ from duckduckgo_search import DDGS
 
 logger = logging.getLogger(__name__)
 
-# --- CONSTANTS (This was missing!) ---
+# --- CONSTANTS ---
 DEFAULT_MAX_CHARS = 3000
-RESEARCH_MAX_CHARS = 15000  # <--- This is what caused the crash
+RESEARCH_MAX_CHARS = 15000
 
+# --- NEWS SEARCH ---
+def get_latest_news(topic, max_results=5):
+    """Searches DuckDuckGo News for the latest headlines."""
+    try:
+        logger.info(f"Fetching news for: {topic}")
+        with DDGS() as ddgs:
+            # 'news' search returns titles, snippets, source, and date
+            results = list(ddgs.news(
+                keywords=topic,
+                region="wt-wt",
+                safesearch="moderate",
+                max_results=max_results
+            ))
+            
+            if not results:
+                return None
+
+            news_summary = f"📰 **Latest News: {topic}**\n"
+            for r in results:
+                title = r.get('title', 'No Title')
+                source = r.get('source', 'Unknown')
+                date = r.get('date', '')
+                url = r.get('url', '#')
+                # Format: • Title - Source (Date)
+                news_summary += f"• [{title}]({url}) - *{source}* ({date})\n"
+            
+            return news_summary
+
+    except Exception as e:
+        logger.error(f"News search error: {e}")
+        return None
+
+# --- WEB SEARCH ---
 def get_search_results(query, max_results=3):
     """Searches DuckDuckGo and returns a list of URLs."""
     try:
@@ -23,6 +56,7 @@ def get_search_results(query, max_results=3):
         logger.error(f"Search error: {e}")
         return []
 
+# --- CONTENT EXTRACTION ---
 def extract_text_from_url(url, max_chars=None):
     """Decides if the URL is a website or a YouTube video."""
     _max = max_chars or DEFAULT_MAX_CHARS
