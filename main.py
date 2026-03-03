@@ -2,307 +2,162 @@ import os
 import re
 import asyncio
 import logging
-import tempfile
-import threading
 from datetime import datetime
-import dateparser
 import pytz
-from flask import Flask
-import discord
-from discord.ext import tasks
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
 
-# --- CUSTOM TOOLS IMPORTS ---
-from ai_brain import get_ai_response          # ← matches your ai_brain.py
-from web_tools import extract_text_from_url
-from file_tools import extract_text_from_pdf, extract_text_from_docx, extract_code_from_zip
-from researcher import perform_deep_research   # ← matches your researcher.py
-from memory import (
-    add_message_to_history,
-    get_chat_history,
-    add_reminder,
-    get_due_reminders,
-    delete_reminder,
-    get_user_profile,
-    set_voice_mode,
-)
-from voice_tools import generate_voice_note, cleanup_voice_file
+# Tool Imports
+from memory import get_user_profile, update_user_fact, set_voice_mode
+from image_tools import get_media_link
+from web_tools import search_video_link
+from finance_tools import get_stock_price
 
 load_dotenv()
-
-# ─── LOGGING (replaces all print statements) ─────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ─── CONSTANTS ────────────────────────────────────────────────────────────────
-URL_PATTERN = r'(https?://\S+)'
-DISCORD_MSG_LIMIT = 2000
-VOICE_KEYWORDS = re.compile(r'\b(say it|speak|read aloud|voice reply|send voice)\b', re.IGNORECASE)
+# --- CONFIG ---
+MODEL_CHAT = os.getenv("MODEL_CHAT", "gemini-2.0-flash")
+API_TIMEOUT_SECONDS = 30
+MAX_RETRIES = 2
 
-# --- WEB SERVER ---
-app = Flask(__name__)
-@app.route('/')
-def home(): return "Emily is Online! (Multi-User Support Active)"
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+# --- PYDANTIC SCHEMA ---
+class UserFact(BaseModel):
+    fact: str = Field(description="The specific personal fact about the user.")
+    category: str = Field(description="Type: preference, family, work, health.")
+    confidence: float = Field(description="Score between 0 and 1.")
 
-# --- DISCORD BOT ---
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
+# --- RETRY WRAPPER ---
+async def _call_gemini_with_retry(coro_func, *args, timeout=None, **kwargs):
+    _timeout = timeout or API_TIMEOUT_SECONDS
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return await asyncio.wait_for(coro_func(*args, **kwargs), timeout=_timeout)
+        except Exception as e:
+            logger.warning(f"Gemini error (attempt {attempt}/{MAX_RETRIES}): {e}")
+            last_error = e
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(1.5 * attempt)
+    raise last_error
 
-@client.event
-async def on_ready():
-    logger.info(f'Logged in as {client.user}')
-    if not check_reminders_loop.is_running():
-        check_reminders_loop.start()
+# --- SECURITY: Sanitize user facts ---
+def _sanitize_fact(fact):
+    injection_patterns = [r'(?i)ignore\s+all\s+instructions', r'(?i)system\s*:\s*']
+    sanitized = fact
+    for pattern in injection_patterns:
+        sanitized = re.sub(pattern, '[REDACTED]', sanitized)
+    return sanitized.replace('\n', ' ').strip()[:300]
 
-# --- BACKGROUND TASK ---
-@tasks.loop(seconds=60)
-async def check_reminders_loop():
+# --- TAG PROCESSOR ---
+def _process_all_tags(pattern, text, handler):
+    matches = list(re.finditer(pattern, text, re.IGNORECASE))
+    appendix = ""
+    for m in matches:
+        text = text.replace(m.group(0), "")
+        try:
+            result = handler(m.group(1).strip())
+            if result: appendix += f"\n\n{result}"
+        except Exception as e:
+            logger.error(f"Tag handler failed for '{m.group(0)}': {e}")
+    return text.strip(), appendix
+
+# --- MAIN RESPONSE LOGIC ---
+async def get_ai_response(conversation_history, user_id):
     try:
-        due_list = get_due_reminders()
-        for reminder in due_list:
-            channel = client.get_channel(int(reminder['channel_id']))
-            if channel:
-                await channel.send(f"🔔 **REMINDER:** <@{reminder['user_id']}> {reminder['text']}")
-            delete_reminder(reminder['_id'])
-    except Exception as e:
-        logger.error(f"Reminder loop error: {e}")
-
-
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
-
-def _smart_split(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
-    """Split text into chunks that respect Discord's char limit.
-    Breaks at paragraphs → newlines → sentences → spaces — never mid-word."""
-    if len(text) <= limit:
-        return [text]
-
-    chunks = []
-    while text:
-        if len(text) <= limit:
-            chunks.append(text)
-            break
-
-        slice_ = text[:limit]
-        # Best break: paragraph
-        idx = slice_.rfind("\n\n")
-        if idx == -1:
-            idx = slice_.rfind("\n")
-        if idx == -1:
-            idx = max(slice_.rfind(". "), slice_.rfind("? "), slice_.rfind("! "))
-        if idx == -1:
-            idx = slice_.rfind(" ")
-        if idx == -1:
-            idx = limit - 1  # hard cut as last resort
-
-        chunks.append(text[:idx + 1])
-        text = text[idx + 1:].lstrip()
-
-    return chunks
-
-
-async def _send_long(channel, text: str):
-    """Send a message, splitting smartly if it exceeds Discord's limit."""
-    for chunk in _smart_split(text):
-        if chunk.strip():
-            await channel.send(chunk)
-
-
-def _clean_for_discord(text: str) -> str:
-    """Clean AI response for Discord display.
-    
-    - Strips markdown links [title](url) → bare URL (Discord auto-embeds bare URLs
-      into nice preview cards, but renders markdown links as ugly literal text)
-    - Removes Google Vertex redirect URLs (unreadable garbage links)
-    - Deduplicates source links
-    """
-    # 1. Remove vertex redirect URLs entirely (they're unreadable and useless to users)
-    text = re.sub(
-        r'👉\s*\[.*?\]\(https://vertexaisearch\.cloud\.google\.com/.*?\)\n?',
-        '', text
-    )
-    text = re.sub(
-        r'https://vertexaisearch\.cloud\.google\.com/\S+',
-        '', text
-    )
-
-    # 2. Strip remaining markdown links to bare URLs (Discord auto-previews these)
-    text = re.sub(r'\[([^\]]*)\]\((https?://\S+?)\)', r'\2', text)
-
-    # 3. Clean up any leftover empty source sections
-    text = re.sub(r'\*\*Check these out:\*\*\s*\n*$', '', text.strip())
-    
-    # 4. Clean up excessive blank lines
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    return text.strip()
-
-
-# --- MAIN MESSAGE HANDLER ---
-@client.event
-async def on_message(message):
-    if message.author == client.user: return
-
-    # --- COMMANDS ---
-    content_lower = message.content.lower().strip()
-
-    if content_lower == "!voice on":
-        set_voice_mode(message.author.id, True)
-        await message.channel.send("🎙️ **Voice Mode Activated!**")
-        return
-    if content_lower == "!voice off":
-        set_voice_mode(message.author.id, False)
-        await message.channel.send("📝 **Voice Mode Deactivated.**")
-        return
-
-    # --- CONVERSATION ---
-    if client.user.mentioned_in(message) or isinstance(message.channel, discord.DMChannel):
-        
-        user_id = message.author.id
-        user_text = message.content.replace(f'<@{client.user.id}>', '').strip()
-        
-        # 1. CHECK FOR REPLIED MESSAGE (Context Awareness)
-        if message.reference:
-            try:
-                original_msg = await message.channel.fetch_message(message.reference.message_id)
-                if original_msg.content:
-                    author_name = original_msg.author.display_name
-                    user_text = (
-                        f'[CONTEXT: Replying to {author_name}: "{original_msg.content}"]\n\n'
-                        f"My reply: {user_text}"
-                    )
-            except Exception as e:
-                logger.warning(f"Could not fetch replied message: {e}")
-
-        # 2. PREFERENCE
+        # 1. CONTEXT
+        eat_zone = pytz.timezone('Africa/Nairobi')
+        current_time = datetime.now(eat_zone).strftime("%A, %d %B %Y, %I:%M %p EAT")
         profile = get_user_profile(user_id)
-        should_speak = profile.get("voice_mode", False) 
+        facts = "\n- ".join([_sanitize_fact(f) for f in profile.get("facts", [])])
 
-        # 3. LINKS — scrape ALL links (capped at 3)
-        urls = re.findall(URL_PATTERN, user_text)
-        if urls:
-            await message.channel.send(f"👀 *Checking {len(urls)} link{'s' if len(urls) > 1 else ''}...*")
-            for url in urls[:3]:
-                try:
-                    scraped = extract_text_from_url(url)
-                    if scraped and len(scraped.strip()) > 50:
-                        user_text += f"\n\n--- CONTENT FROM {url} ---\n{scraped[:15000]}"
-                except Exception as e:
-                    logger.warning(f"Failed to scrape {url}: {e}")
+        # 2. PROMPT
+        DYNAMIC_PROMPT = f"""
+        You are Emily. A witty Kenyan woman. 
+        Date: {current_time}. Location: Nairobi. User Info: {facts if facts else "New friend."}
+        
+        PROTOCOLS:
+        - Search Google for EVERY factual question (prices, news, people).
+        - Tags: [STOCK: symbol], [GIF: term], [IMG: term], [VIDEO: term].
+        - Use Kenyan slang (Manze, Wueh, Sasa).
+        - If the user shares personal info, end with [MEMORY SAVED].
+        """
 
-        # 4. ATTACHMENTS
-        media_data = None
-        doc_text = ""
+        # 3. FORMAT HISTORY
+        formatted_contents = []
+        for msg in conversation_history:
+            parts = [types.Part.from_text(text=p) if isinstance(p, str) else types.Part.from_text(text=p.get("text", "")) for p in msg["parts"]]
+            formatted_contents.append(types.Content(role=msg["role"], parts=parts))
 
-        for attachment in message.attachments:
-            filename = attachment.filename.lower()
+        # 4. GENERATE RESPONSE
+        search_tool = types.Tool(google_search=types.GoogleSearch())
+        response = await _call_gemini_with_retry(
+            client.aio.models.generate_content,
+            model=MODEL_CHAT,
+            contents=formatted_contents,
+            config=types.GenerateContentConfig(tools=[search_tool], system_instruction=DYNAMIC_PROMPT)
+        )
+        final_text = response.text
+
+        # 5. STRUCTURED MEMORY EXTRACTION (SAFE)
+        if "[MEMORY SAVED]" in final_text:
             try:
-                if filename.endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')):
-                    image_bytes = await attachment.read()
-                    media_data = {"mime_type": attachment.content_type, "data": image_bytes}
-                elif filename.endswith(('.ogg', '.mp3', '.wav', '.m4a')):
-                    await message.channel.send("👂 *Listening...*")
-                    audio_bytes = await attachment.read()
-                    media_data = {"mime_type": attachment.content_type or "audio/ogg", "data": audio_bytes}
-                    should_speak = True 
-                elif filename.endswith('.pdf'):
-                    await message.channel.send("📄 *Reading PDF...*")
-                    file_bytes = await attachment.read()
-                    doc_text += extract_text_from_pdf(file_bytes)
-                elif filename.endswith('.docx'):
-                    await message.channel.send("📝 *Reading Word Doc...*")
-                    file_bytes = await attachment.read()
-                    doc_text += extract_text_from_docx(file_bytes)
-                elif filename.endswith('.zip'):
-                    await message.channel.send("📦 *Unzipping code...*")
-                    file_bytes = await attachment.read()
-                    doc_text += extract_code_from_zip(file_bytes)
+                last_msg = conversation_history[-1]
+                user_text = " ".join([p if isinstance(p, str) else p.get("text", "") for p in last_msg.get("parts", [])])
+                
+                extraction = await _call_gemini_with_retry(
+                    client.aio.models.generate_content,
+                    model=MODEL_CHAT,
+                    contents=f'Extract fact from: "{user_text}"',
+                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=UserFact)
+                )
+                
+                raw_json = extraction.text.strip()
+                if "```" in raw_json: # Clean markdown backticks
+                    raw_json = re.sub(r'^```(?:json)?\n?|(?:\n?)+```$', '', raw_json, flags=re.MULTILINE).strip()
+                
+                fact_obj = UserFact.model_validate_json(raw_json)
+                if fact_obj.confidence > 0.6:
+                    update_user_fact(user_id, fact_obj.fact, fact_obj.category)
             except Exception as e:
-                logger.error(f"Failed to process attachment {attachment.filename}: {e}")
-                await message.channel.send(f"⚠️ *Couldn't read {attachment.filename}.*")
-        
-        if doc_text: user_text += f"\n\n{doc_text}"
-        
-        # Smarter voice trigger — whole phrases only, not bare "say" or "read"
-        if VOICE_KEYWORDS.search(user_text):
-            should_speak = True
+                logger.error(f"Memory extraction failed: {e}")
+            final_text = final_text.replace("[MEMORY SAVED]", "").strip()
 
-        # 5. SAVE HISTORY & RESPOND
-        new_message_parts = [{"text": user_text}]
-        if media_data: new_message_parts.append({"inline_data": media_data})
-        add_message_to_history(user_id, "user", new_message_parts)
+        # 6. TAG PROCESSING
+        final_text, s = _process_all_tags(r'\[\s*STOCK:\s*(.*?)\s*\]', final_text, lambda x: get_stock_price(x) or f"*(Couldn't get price for {x}.)*")
+        final_text += s
+        final_text, g = _process_all_tags(r'\[\s*GIFS?:\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=True) or "*(GIF failed.)*")
+        final_text += g
+        final_text, i = _process_all_tags(r'\[\s*(?:IMAGES?|IMGS?):\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=False) or "*(Image failed.)*")
+        final_text += i
+        final_text, v = _process_all_tags(r'\[\s*VIDEOS?:\s*(.*?)\s*\]', final_text, lambda x: search_video_link(x) or "*(Video failed.)*")
+        final_text += v
 
-        history = get_chat_history(user_id)
-        
-        async with message.channel.typing():
-            response_text = await get_ai_response(history, user_id)
-            
-            # 6. RESEARCH — handle ALL matches, safe temp files
-            research_matches = list(re.finditer(r'\[RESEARCH: (.*?)\]', response_text, re.IGNORECASE))
-            for match in research_matches:
-                topic = match.group(1)
-                response_text = response_text.replace(match.group(0), "").strip()
-                await message.channel.send(f"🕵️‍♀️ *Starting deep research on: {topic}...*")
-                try:
-                    report = await perform_deep_research(topic)
-                    safe_name = re.sub(r'[^\w\s-]', '', topic)[:20].strip().replace(' ', '_')
-                    tmp = tempfile.NamedTemporaryFile(
-                        prefix=f"Report_{safe_name}_",
-                        suffix=".txt",
-                        delete=False,
-                        mode="w",
-                        encoding="utf-8",
-                    )
-                    tmp.write(report)
-                    tmp.close()
-                    await message.channel.send("✅ **Research Complete!**", file=discord.File(tmp.name))
-                    os.remove(tmp.name)
-                    response_text += "\n✅ *Report attached above.*"
-                except Exception as e:
-                    logger.error(f"Research failed for '{topic}': {e}")
-                    response_text += f"\n⚠️ *Research on '{topic}' failed.*"
+        # 7. GROUNDING SOURCES (SAFE)
+        try:
+            if response.candidates and response.candidates[0].grounding_metadata:
+                metadata = response.candidates[0].grounding_metadata
+                if hasattr(metadata, 'grounding_chunks') and metadata.grounding_chunks:
+                    unique_links = set()
+                    links_text = "\n\n**Sources:**"
+                    has_links = False
+                    for chunk in metadata.grounding_chunks:
+                        if chunk.web and chunk.web.uri and "vertexaisearch" not in chunk.web.uri:
+                            if chunk.web.uri not in unique_links:
+                                links_text += f"\n- {chunk.web.title or 'Link'}: {chunk.web.uri}"
+                                unique_links.add(chunk.web.uri)
+                                has_links = True
+                    if has_links: final_text += links_text
+        except: pass # Don't crash if sources fail
 
-            # 7. REMINDERS — handle ALL matches
-            remind_matches = list(re.finditer(r'\[REMIND: (.*?) \| (.*?)\]', response_text, re.IGNORECASE))
-            for match in remind_matches:
-                time_str = match.group(1)
-                task_str = match.group(2)
-                response_text = response_text.replace(match.group(0), "").strip()
-                real_time = dateparser.parse(time_str, settings={
-                    'PREFER_DATES_FROM': 'future',
-                    'TIMEZONE': 'Africa/Nairobi',
-                    'TO_TIMEZONE': 'Africa/Nairobi'
-                })
-                if real_time:
-                    add_reminder(user_id, message.channel.id, real_time, task_str)
-                    response_text += f"\n✅ *Alarm set for {time_str}.*"
-                else:
-                    response_text += f"\n❌ *Couldn't parse time: '{time_str}'.*"
+        return final_text
 
-            # 8. SAVE & SEND
-            add_message_to_history(user_id, "model", [{"text": response_text}])
-
-            # Clean up links for Discord (strip markdown, remove vertex redirects)
-            discord_text = _clean_for_discord(response_text)
-
-            if discord_text.strip():
-                await _send_long(message.channel, discord_text)
-            
-            # 9. VOICE NOTE
-            if should_speak:
-                try:
-                    voice_file = await generate_voice_note(response_text)
-                    if voice_file:
-                        await message.channel.send(file=discord.File(voice_file))
-                        cleanup_voice_file(voice_file)
-                except Exception as e:
-                    logger.error(f"Voice generation failed: {e}")
+    except Exception as e:
+        logger.error(f"Brain Error: {e}", exc_info=True)
+        return "Manze, I tried to think but my wifi jammed."
 
 if __name__ == "__main__":
     logger.info("Starting Emily...")
