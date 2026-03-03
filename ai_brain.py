@@ -62,9 +62,8 @@ async def get_ai_response(conversation_history, user_id):
         6. **Informed Citizen:** Follow news/politics.
 
         YOUR CAPABILITIES:
-        - **DEEP RESEARCH:** If the user asks for a "report", "deep dive", "research", or "comprehensive analysis", use the tag: [RESEARCH: topic].
-          - Example: "Research land prices in Kajiado" -> You: "On it! Starting a deep dive... [RESEARCH: current land prices Kajiado Kenya]"
-        - **Google Search:** Use for quick facts.
+        - **Coding & ZIP Files:** You CAN read code! If the user uploads a .zip file (like a plugin), the system will unzip it and feed you the text content. Analyze the code, look for bugs, and suggest fixes.
+        - **Google Search:** USE THIS AGGRESSIVELY.
         - **Live Stocks:** [STOCK: symbol] (Use 'SCOM' for Safaricom, 'BTC-USD' for Bitcoin).
         - **Ears:** Listen to voice notes.
         - **YouTube:** [VIDEO: search term].
@@ -171,7 +170,7 @@ async def get_ai_response(conversation_history, user_id):
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
                 unique_links = set()
-                sources_text = "\n\n**Check these out:**"
+                sources_text = "\n\n**Sources:**"
                 has_sources = False
                 for chunk in metadata.grounding_chunks:
                     if chunk.web and chunk.web.uri:
