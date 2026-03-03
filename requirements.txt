@@ -13,6 +13,7 @@ duckduckgo-search
 edge-tts
 dateparser
 pytz
-yfinance
 elevenlabs
 pydantic
+requests
+beautifulsoup4
