@@ -27,7 +27,7 @@ def get_user_profile(user_id):
     if not user_data:
         return {"_id": user_id, "facts": [], "style": "friendly", "history": []}
     
-    # If facts are stored as objects, extract just the 'fact' string for Emily's prompt
+    # Flatten structured facts for Emily's prompt
     raw_facts = user_data.get("facts", [])
     clean_facts = []
     for f in raw_facts:
@@ -50,10 +50,18 @@ def update_user_fact(user_id, fact_text, category="general"):
         "added_at": datetime.now(eat_zone)
     }
 
-    # Use $push to keep a history of facts, or $addToSet if you want to avoid exact duplicates
     users_col.update_one(
         {"_id": user_id},
         {"$push": {"facts": fact_entry}}, 
+        upsert=True
+    )
+
+def set_voice_mode(user_id, enabled):
+    """Turns voice mode ON (True) or OFF (False) for a user."""
+    user_id = str(user_id)
+    users_col.update_one(
+        {"_id": user_id},
+        {"$set": {"voice_mode": enabled}}, 
         upsert=True
     )
 
