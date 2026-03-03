@@ -3,13 +3,12 @@ import certifi
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from datetime import datetime
-import pytz  # <--- New import for Timezone support
+import pytz
 
 load_dotenv()
 
 # --- CONNECT TO MONGODB ---
 try:
-    # certifi.where() fixes SSL errors on cloud servers
     client = MongoClient(os.getenv("MONGO_URI"), tlsCAFile=certifi.where())
     db = client["emily_brain_db"]
     users_col = db["users"]
@@ -18,46 +17,59 @@ try:
 except Exception as e:
     print(f"❌ Could not connect to MongoDB: {e}")
 
-# --- USER PROFILE FUNCTIONS (Long-Term Memory) ---
+# --- USER PROFILE FUNCTIONS ---
+
 def get_user_profile(user_id):
-    """Fetches user facts and style preferences."""
+    """Fetches user profile and flattens facts into strings for the AI prompt."""
     user_id = str(user_id)
     user_data = users_col.find_one({"_id": user_id})
-    if user_data:
-        return user_data
-    else:
+    
+    if not user_data:
         return {"_id": user_id, "facts": [], "style": "friendly", "history": []}
+    
+    # If facts are stored as objects, extract just the 'fact' string for Emily's prompt
+    raw_facts = user_data.get("facts", [])
+    clean_facts = []
+    for f in raw_facts:
+        if isinstance(f, dict):
+            clean_facts.append(f.get("fact", ""))
+        else:
+            clean_facts.append(str(f))
+            
+    user_data["facts"] = clean_facts
+    return user_data
 
-def update_user_fact(user_id, new_fact):
-    """Adds a permanent fact about the user."""
+def update_user_fact(user_id, fact_text, category="general"):
+    """Adds a structured fact with a category and timestamp."""
     user_id = str(user_id)
+    eat_zone = pytz.timezone('Africa/Nairobi')
+    
+    fact_entry = {
+        "fact": fact_text,
+        "category": category,
+        "added_at": datetime.now(eat_zone)
+    }
+
+    # Use $push to keep a history of facts, or $addToSet if you want to avoid exact duplicates
     users_col.update_one(
         {"_id": user_id},
-        {"$addToSet": {"facts": new_fact}}, 
+        {"$push": {"facts": fact_entry}}, 
         upsert=True
     )
 
-def set_voice_mode(user_id, enabled):
-    """Turns voice mode ON (True) or OFF (False) for a user."""
-    user_id = str(user_id)
-    users_col.update_one(
-        {"_id": user_id},
-        {"$set": {"voice_mode": enabled}}, 
-        upsert=True
-    )
+# --- CHAT HISTORY FUNCTIONS ---
 
-# --- CHAT HISTORY FUNCTIONS (Context) ---
 def add_message_to_history(user_id, role, message_parts):
     """Saves the conversation to the database."""
     user_id = str(user_id)
+    eat_zone = pytz.timezone('Africa/Nairobi')
     
     new_message = {
         "role": role,
         "parts": message_parts,
-        "timestamp": datetime.now()
+        "timestamp": datetime.now(eat_zone)
     }
 
-    # Push message & keep only last 30 to save space
     users_col.update_one(
         {"_id": user_id},
         {"$push": {"history": {"$each": [new_message], "$slice": -30}}},
@@ -65,37 +77,30 @@ def add_message_to_history(user_id, role, message_parts):
     )
 
 def get_chat_history(user_id):
-    """Retrieves the last 30 messages for context."""
+    """Retrieves the last 30 messages."""
     user_id = str(user_id)
     data = users_col.find_one({"_id": user_id}, {"history": 1})
     
     if data and "history" in data:
-        # We remove the 'timestamp' before sending to Gemini to keep it clean
-        clean_history = []
-        for msg in data["history"]:
-            clean_history.append({"role": msg["role"], "parts": msg["parts"]})
-        return clean_history
+        return [{"role": msg["role"], "parts": msg["parts"]} for msg in data["history"]]
     return []
 
-# --- REMINDER FUNCTIONS (Alarm Clock with Timezone) ---
+# --- REMINDER FUNCTIONS ---
+
 def add_reminder(user_id, channel_id, remind_time, reminder_text):
     """Saves a scheduled task."""
     reminders_col.insert_one({
         "user_id": user_id,
         "channel_id": channel_id,
-        "time": remind_time, # DateTime object (Timezone Aware)
+        "time": remind_time, 
         "text": reminder_text,
         "status": "pending"
     })
 
 def get_due_reminders():
-    """Finds reminders that need to be sent NOW (Checking Nairobi Time)."""
-    # 1. Get current time in Nairobi
+    """Finds reminders that need to be sent NOW."""
     eat_zone = pytz.timezone('Africa/Nairobi')
     now_eat = datetime.now(eat_zone)
-    
-    # 2. Find reminders where the scheduled time is BEFORE or EQUAL to right now
-    # MongoDB handles the comparison correctly if the saved time is also timezone-aware
     return list(reminders_col.find({"time": {"$lte": now_eat}}))
 
 def delete_reminder(reminder_id):
