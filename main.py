@@ -2,6 +2,8 @@ import os
 import re
 import asyncio
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
 import pytz
 from dotenv import load_dotenv
@@ -16,7 +18,9 @@ from web_tools import search_video_link
 from finance_tools import get_stock_price
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 # --- CONFIG ---
@@ -29,6 +33,21 @@ class UserFact(BaseModel):
     fact: str = Field(description="The specific personal fact about the user.")
     category: str = Field(description="Type: preference, family, work, health.")
     confidence: float = Field(description="Score between 0 and 1.")
+
+# --- KOYEB HEALTH CHECK SERVER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Emily is alive and kicking!")
+
+def run_health_server():
+    server = HTTPServer(('0.0.0.0', 8000), HealthCheckHandler)
+    logger.info("Health check server started on port 8000")
+    server.serve_forever()
+
+# Start the health check server in a separate thread immediately
+threading.Thread(target=run_health_server, daemon=True).start()
 
 # --- RETRY WRAPPER ---
 async def _call_gemini_with_retry(coro_func, *args, timeout=None, **kwargs):
@@ -68,7 +87,7 @@ def _process_all_tags(pattern, text, handler):
 # --- MAIN RESPONSE LOGIC ---
 async def get_ai_response(conversation_history, user_id):
     try:
-        # 1. CONTEXT
+        # 1. CONTEXT (Nairobi Time & User Profile)
         eat_zone = pytz.timezone('Africa/Nairobi')
         current_time = datetime.now(eat_zone).strftime("%A, %d %B %Y, %I:%M %p EAT")
         profile = get_user_profile(user_id)
@@ -76,14 +95,14 @@ async def get_ai_response(conversation_history, user_id):
 
         # 2. PROMPT
         DYNAMIC_PROMPT = f"""
-        You are Emily. A witty Kenyan woman. 
-        Date: {current_time}. Location: Nairobi. User Info: {facts if facts else "New friend."}
+        You are Emily. A witty, smart Kenyan woman in her 30s. 
+        Date: {current_time}. Location: Nairobi. User Info: {facts if facts else "A new friend."}
         
         PROTOCOLS:
-        - Search Google for EVERY factual question (prices, news, people).
+        - Use Google Search for EVERY factual question (stock prices, news, people, tech).
         - Tags: [STOCK: symbol], [GIF: term], [IMG: term], [VIDEO: term].
-        - Use Kenyan slang (Manze, Wueh, Sasa).
-        - If the user shares personal info, end with [MEMORY SAVED].
+        - Use Kenyan flavor: Manze, Eish, Wueh, Sasa, Pole.
+        - If the user shares a personal fact, end your message with [MEMORY SAVED].
         """
 
         # 3. FORMAT HISTORY
@@ -92,7 +111,7 @@ async def get_ai_response(conversation_history, user_id):
             parts = [types.Part.from_text(text=p) if isinstance(p, str) else types.Part.from_text(text=p.get("text", "")) for p in msg["parts"]]
             formatted_contents.append(types.Content(role=msg["role"], parts=parts))
 
-        # 4. GENERATE RESPONSE
+        # 4. GENERATE CHAT RESPONSE
         search_tool = types.Tool(google_search=types.GoogleSearch())
         response = await _call_gemini_with_retry(
             client.aio.models.generate_content,
@@ -111,28 +130,34 @@ async def get_ai_response(conversation_history, user_id):
                 extraction = await _call_gemini_with_retry(
                     client.aio.models.generate_content,
                     model=MODEL_CHAT,
-                    contents=f'Extract fact from: "{user_text}"',
+                    contents=f'Extract the personal fact from: "{user_text}"',
                     config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=UserFact)
                 )
                 
+                # Clean markdown JSON if present
                 raw_json = extraction.text.strip()
-                if "```" in raw_json: # Clean markdown backticks
+                if "```" in raw_json:
                     raw_json = re.sub(r'^```(?:json)?\n?|(?:\n?)+```$', '', raw_json, flags=re.MULTILINE).strip()
                 
                 fact_obj = UserFact.model_validate_json(raw_json)
                 if fact_obj.confidence > 0.6:
                     update_user_fact(user_id, fact_obj.fact, fact_obj.category)
+                    logger.info(f"Memory saved for {user_id}")
             except Exception as e:
                 logger.error(f"Memory extraction failed: {e}")
+            
             final_text = final_text.replace("[MEMORY SAVED]", "").strip()
 
-        # 6. TAG PROCESSING
+        # 6. TAG PROCESSING (FLEXIBLE REGEX)
         final_text, s = _process_all_tags(r'\[\s*STOCK:\s*(.*?)\s*\]', final_text, lambda x: get_stock_price(x) or f"*(Couldn't get price for {x}.)*")
         final_text += s
+        
         final_text, g = _process_all_tags(r'\[\s*GIFS?:\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=True) or "*(GIF failed.)*")
         final_text += g
+        
         final_text, i = _process_all_tags(r'\[\s*(?:IMAGES?|IMGS?):\s*(.*?)\s*\]', final_text, lambda x: get_media_link(x, is_gif=False) or "*(Image failed.)*")
         final_text += i
+        
         final_text, v = _process_all_tags(r'\[\s*VIDEOS?:\s*(.*?)\s*\]', final_text, lambda x: search_video_link(x) or "*(Video failed.)*")
         final_text += v
 
@@ -151,19 +176,10 @@ async def get_ai_response(conversation_history, user_id):
                                 unique_links.add(chunk.web.uri)
                                 has_links = True
                     if has_links: final_text += links_text
-        except: pass # Don't crash if sources fail
+        except: pass
 
         return final_text
 
     except Exception as e:
         logger.error(f"Brain Error: {e}", exc_info=True)
         return "Manze, I tried to think but my wifi jammed."
-
-if __name__ == "__main__":
-    logger.info("Starting Emily...")
-    t = threading.Thread(target=run_web_server, daemon=True)  # daemon=True for clean shutdown
-    t.start()
-    try:
-        client.run(os.getenv("DISCORD_TOKEN"))
-    except Exception as e:
-        logger.critical(f"Discord connection failed: {e}")
