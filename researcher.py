@@ -9,112 +9,73 @@ from web_tools import get_search_results, extract_text_from_url, RESEARCH_MAX_CH
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ─── Hybrid Model Config ─────────────────────────────────────────────────────
-# Heavy reasoning model for research; fast model as fallback
+# Configuration
 MODEL_RESEARCH = os.getenv("MODEL_RESEARCH", "gemini-2.5-flash")
 MODEL_FALLBACK = os.getenv("MODEL_CHAT", "gemini-2.0-flash")
-RESEARCH_TIMEOUT = int(os.getenv("RESEARCH_TIMEOUT", "90"))
-MAX_SOURCES = int(os.getenv("RESEARCH_MAX_SOURCES", "5"))
+RESEARCH_TIMEOUT = 90
+MAX_SOURCES = 5
 
-# Cap content per source so we don't blow the context window
-# ~4 chars per token → 20 000 chars ≈ 5 000 tokens per source
-MAX_CHARS_PER_SOURCE = 20_000
-
-
-# ─── Analyst Prompt ───────────────────────────────────────────────────────────
 REPORT_PROMPT = """
-You are an expert Research Analyst.
-Read the raw data provided below from various websites.
-Write a comprehensive, well-structured report.
+You are a Senior Research Analyst.
+Your goal is to write a comprehensive, professional, and detailed report based ONLY on the raw data provided below.
 
-Format:
-- **Title** (Bold)
-- **Executive Summary** (Brief overview)
-- **Key Findings** (Bulleted list of facts)
-- **Analysis** (Deep dive into the details)
-- **Conclusion & Recommendation**
-- **Sources** (List the URLs used)
+STRUCTURE:
+1. **Title** (Bold & Clear)
+2. **Executive Summary** (High-level overview)
+3. **Deep Dive Analysis** (Break down the topic into sub-sections. Use data, numbers, and facts from the text.)
+4. **Key Trends/Statistics** (Bullet points of hard data found)
+5. **Conclusion & Outlook**
+6. **References** (List the URLs provided)
 
-Tone: Professional, Insightful, and Kenyan-friendly (clear English).
+TONE:
+- Professional but accessible (Kenyan-friendly English).
+- If the raw data is thin, admit it, but squeeze every drop of value from it.
+- Do NOT hallucinate facts not present in the sources.
 """
 
-
-async def _generate_report(raw_data: str, model: str, timeout: int) -> str:
-    """Call Gemini with the scraped data and return the report text."""
-    response = await asyncio.wait_for(
-        client.aio.models.generate_content(
-            model=model,
-            contents=[
-                types.Part.from_text(text=REPORT_PROMPT),
-                types.Part.from_text(text=raw_data),
-            ],
-        ),
-        timeout=timeout,
+async def _generate_report(raw_data, model):
+    response = await client.aio.models.generate_content(
+        model=model,
+        contents=[
+            types.Part.from_text(text=REPORT_PROMPT),
+            types.Part.from_text(text=raw_data),
+        ]
     )
     return response.text
 
+async def perform_deep_research(topic):
+    logger.info(f"Research started: {topic}")
 
-async def perform_deep_research(topic: str) -> str:
-    """
-    1. Searches the web for the topic.
-    2. Reads up to MAX_SOURCES websites (with per-URL error handling).
-    3. Compiles a detailed report using 2.5 Flash (falls back to 2.0 Flash).
-    """
-
-    # ── 1. Gather sources ─────────────────────────────────────────────────
-    logger.info(f"Research started: {topic[:80]}")
-
+    # 1. Gather Sources (Now with Junk Filter)
     urls = get_search_results(topic, max_results=MAX_SOURCES)
     if not urls:
-        return "I couldn't find any sources for that topic."
+        return "I couldn't find any reliable sources for that topic. The internet might be acting up."
 
     raw_data = f"RESEARCH TOPIC: {topic}\n\n"
-    sources_used = []
+    valid_sources = 0
 
+    # 2. Read Sources
     for url in urls:
         try:
-            # Pass higher char limit for research-depth scraping
             content = extract_text_from_url(url, max_chars=RESEARCH_MAX_CHARS)
-            if not content or len(content.strip()) < 50:
-                logger.warning(f"Skipped (too short / empty): {url}")
-                continue
-            # Truncate oversized pages to stay within context limits
-            if len(content) > MAX_CHARS_PER_SOURCE:
-                content = content[:MAX_CHARS_PER_SOURCE] + "\n[...truncated]"
-            # web_tools already adds "--- SOURCE: {url} ---" header
-            raw_data += f"{content}\n"
-            sources_used.append(url)
-        except Exception as e:
-            logger.warning(f"Failed to extract {url}: {e}")
-            continue
+            if len(content) > 500: # Only use if we actually got text
+                raw_data += f"{content}\n"
+                valid_sources += 1
+        except: continue
 
-    if not sources_used:
-        return "I found some links but couldn't read any of them. The sites may be blocking bots."
+    if valid_sources == 0:
+        return "I found links, but I couldn't read the content (blocked by firewalls). Try a different topic."
 
-    logger.info(f"Research scraped {len(sources_used)}/{len(urls)} sources for: {topic[:60]}")
-
-    # ── 2. Generate report — hybrid model with fallback ───────────────────
-    # Try the reasoning model first (deeper analysis, slower)
+    # 3. Generate Report
     try:
-        logger.info(f"Generating report with {MODEL_RESEARCH}")
-        report = await _generate_report(raw_data, MODEL_RESEARCH, RESEARCH_TIMEOUT)
-        if report:
-            return f"📊 **Deep Research Report**\n\n{report}"
-    except asyncio.TimeoutError:
-        logger.warning(f"{MODEL_RESEARCH} timed out after {RESEARCH_TIMEOUT}s — falling back")
+        report = await asyncio.wait_for(_generate_report(raw_data, MODEL_RESEARCH), timeout=RESEARCH_TIMEOUT)
+        return f"📊 **Deep Research Report**\n\n{report}"
     except Exception as e:
-        logger.warning(f"{MODEL_RESEARCH} failed: {e} — falling back")
-
-    # Fallback to the fast/stable model
-    try:
-        logger.info(f"Generating report with fallback {MODEL_FALLBACK}")
-        report = await _generate_report(raw_data, MODEL_FALLBACK, 45)
-        if report:
-            return f"📊 **Research Report** *(standard mode)*\n\n{report}"
-    except Exception as e:
-        logger.error(f"Fallback model also failed: {e}")
-
-    return "*(Both research engines failed. Try again in a bit!)*"
+        # Fallback to 2.0 if 2.5 fails
+        try:
+            report = await _generate_report(raw_data, MODEL_FALLBACK)
+            return f"📊 **Research Report (Standard Mode)**\n\n{report}"
+        except:
+            return "Report generation failed."

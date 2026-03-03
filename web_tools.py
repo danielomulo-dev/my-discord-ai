@@ -9,24 +9,56 @@ logger = logging.getLogger(__name__)
 
 # --- CONSTANTS ---
 DEFAULT_MAX_CHARS = 3000
-RESEARCH_MAX_CHARS = 15000
+RESEARCH_MAX_CHARS = 20000 # Increased for better reports
+
+# Domains that are usually useless for deep research reports
+JUNK_DOMAINS = [
+    "zhihu.com", "quora.com", "reddit.com", "stackexchange.com", 
+    "stackoverflow.com", "facebook.com", "instagram.com", "twitter.com", 
+    "tiktok.com", "pinterest.com", "youtube.com"
+]
+
+# --- INTELLIGENT WEB SEARCH ---
+def get_search_results(query, max_results=3):
+    """Searches DuckDuckGo and filters out junk sites."""
+    try:
+        # Append keywords to find better articles
+        refined_query = f"{query} analysis report article"
+        logger.info(f"Searching: {refined_query}")
+        
+        valid_urls = []
+        
+        with DDGS() as ddgs:
+            # Fetch more results than we need (10) so we can filter the bad ones
+            results = list(ddgs.text(refined_query, region="wt-wt", safesearch="moderate", max_results=15))
+            
+            for r in results:
+                url = r['href']
+                # Check against Junk List
+                if any(junk in url for junk in JUNK_DOMAINS):
+                    continue
+                
+                # If it passes, keep it
+                valid_urls.append(url)
+                
+                # Stop once we have enough good links
+                if len(valid_urls) >= max_results:
+                    break
+            
+            return valid_urls
+
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        return []
 
 # --- NEWS SEARCH ---
 def get_latest_news(topic, max_results=5):
-    """Searches DuckDuckGo News for the latest headlines."""
+    """Searches DuckDuckGo News."""
     try:
         logger.info(f"Fetching news for: {topic}")
         with DDGS() as ddgs:
-            # 'news' search returns titles, snippets, source, and date
-            results = list(ddgs.news(
-                keywords=topic,
-                region="wt-wt",
-                safesearch="moderate",
-                max_results=max_results
-            ))
-            
-            if not results:
-                return None
+            results = list(ddgs.news(keywords=topic, region="wt-wt", safesearch="moderate", max_results=max_results))
+            if not results: return None
 
             news_summary = f"📰 **Latest News: {topic}**\n"
             for r in results:
@@ -34,31 +66,14 @@ def get_latest_news(topic, max_results=5):
                 source = r.get('source', 'Unknown')
                 date = r.get('date', '')
                 url = r.get('url', '#')
-                # Format: • Title - Source (Date)
                 news_summary += f"• [{title}]({url}) - *{source}* ({date})\n"
-            
             return news_summary
-
     except Exception as e:
         logger.error(f"News search error: {e}")
         return None
 
-# --- WEB SEARCH ---
-def get_search_results(query, max_results=3):
-    """Searches DuckDuckGo and returns a list of URLs."""
-    try:
-        logger.info(f"Searching: {query}")
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, region="wt-wt", safesearch="moderate", max_results=max_results))
-            urls = [r['href'] for r in results]
-            return urls
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        return []
-
 # --- CONTENT EXTRACTION ---
 def extract_text_from_url(url, max_chars=None):
-    """Decides if the URL is a website or a YouTube video."""
     _max = max_chars or DEFAULT_MAX_CHARS
     if "youtube.com" in url or "youtu.be" in url:
         return get_youtube_transcript(url, max_chars=_max)
@@ -66,28 +81,27 @@ def extract_text_from_url(url, max_chars=None):
         return get_website_content(url, max_chars=_max)
 
 def get_website_content(url, max_chars=None):
-    """Scrape a webpage."""
     _max = max_chars or DEFAULT_MAX_CHARS
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         response = requests.get(url, headers=headers, timeout=10)
-        
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        for script in soup(["script", "style", "nav", "footer", "header"]):
+        # Aggressive cleaning
+        for script in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
             script.extract()    
             
         text = soup.get_text()
         lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
+        # Filter out short navigation lines
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  ") if len(phrase) > 20)
+        text = '\n'.join(chunks)
         
         return f"\n\n--- SOURCE: {url} ---\n{text[:_max]}..."
     except Exception as e:
         return f"\n[Could not read {url}: {e}]"
 
 def get_youtube_transcript(url, max_chars=None):
-    """Get YouTube captions."""
     _max = max_chars or DEFAULT_MAX_CHARS
     try:
         video_id = None
@@ -100,7 +114,6 @@ def get_youtube_transcript(url, max_chars=None):
     except: return ""
 
 def search_video_link(query):
-    """Finds a specific YouTube video link."""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.videos(keywords=f"site:youtube.com {query}", max_results=1))
