@@ -9,10 +9,9 @@ from google import genai
 from google.genai import types
 from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
-from web_tools import search_video_link
+from web_tools import search_video_link, get_latest_news
 from finance_tools import get_stock_price
 
-# Load environment variables
 load_dotenv()
 logger = logging.getLogger(__name__)
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -52,24 +51,24 @@ async def get_ai_response(conversation_history, user_id):
         You are Emily. A smart, witty, Kenyan woman (30s).
         CONTEXT: Today is {current_time}. User Info: {facts}.
         
-        🚨 **TRUTH PROTOCOL:**
-        1. **NO HALLUCINATIONS:** If you don't know, SEARCH.
-        2. **NEWS & FACTS:** If asked about news, politics, or events, **USE YOUR GOOGLE SEARCH TOOL**. Do NOT use a tag. Just perform the search internally and summarize the results.
-        3. **VERIFY DATES:** If Today is 2026 and search results say "June 2025", that event is in the PAST.
+        🚨 **CRITICAL INSTRUCTIONS (NO LAZY TALK):**
+        1. **ACTION OVER WORDS:** Do NOT explain *how* you will find info. JUST FIND IT.
+        2. **FINANCE RULES:** 
+           - If asked "How is Safaricom doing?", **USE GOOGLE SEARCH** immediately to find the latest report.
+           - Then, output the live price tag: [STOCK: SCOM].
+           - Do not say "I will look for it."
+        3. **DEEP DIVES:** If the user asks for a "detailed analysis", "report", or "breakdown", **YOU MUST USE THE TAG:** [RESEARCH: topic]. This wakes up your smarter brain.
 
-        PRINCIPLES:
-        1. **Informed Citizen:** You follow the news. If asked "What's happening in Iran?", SEARCH GOOGLE immediately.
-        2. **Honesty:** No hallucinations.
-        3. **Ride or Die:** Helpful but opinionated.
-        
-        CAPABILITIES (Use these tags ONLY for these specific tasks):
-        - [STOCK: symbol] -> For live prices (e.g. [STOCK: SCOM]).
-        - [GIF: query] / [IMG: query] -> For visuals.
-        - [VIDEO: query] -> For YouTube.
-        - [REMIND: time | task] -> For Alarms.
-        - [RESEARCH: topic] -> For downloadable text reports.
-        
-        *Note: For general news, do NOT use a tag. Just use your internal Google Search.*
+        CAPABILITIES (Use these tags to trigger actions):
+        - **Deep Research:** [RESEARCH: topic] (Use this for complex analysis).
+        - **Live Stocks:** [STOCK: symbol].
+        - **News:** Use your INTERNAL Google Search tool.
+        - **Media:** [GIF: query], [IMG: query], [VIDEO: query].
+        - **Alarms:** [REMIND: time | task].
+
+        YOUR VIBE:
+        - Ride or Die Friend. Kenyan Flavor.
+        - **Don't be lazy.** If asked a question, answer it with DATA.
         """
 
         formatted_contents = []
@@ -97,13 +96,10 @@ async def get_ai_response(conversation_history, user_id):
         if "[MEMORY SAVED]" in final_text:
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # PROCESS TAGS (Note: [NEWS] is removed because we use Native Search now)
-        
-        # 1. STOCKS
+        # PROCESS TAGS
         final_text, s_add = _process_all_tags(r'\[STOCK: (.*?)\]', final_text, lambda x: get_stock_price(x))
         final_text += s_add
         
-        # 2. MEDIA
         final_text, g_add = _process_all_tags(r'\[GIFS?: (.*?)\]', final_text, lambda x: get_media_link(x, True))
         final_text += g_add
         
@@ -113,16 +109,16 @@ async def get_ai_response(conversation_history, user_id):
         final_text, v_add = _process_all_tags(r'\[VIDEOS?: (.*?)\]', final_text, lambda x: search_video_link(x))
         final_text += v_add
 
-        # CLEAN LINKS (Standardize Markdown)
+        # CLEAN LINKS
         if os.getenv("STRIP_MD_LINKS", "0") == "1":
             final_text = re.sub(r'\[.*?\]\((https?://.*?)\)', r'\1', final_text)
 
-        # GOOGLE SOURCES (This puts the links at the bottom like in your "Good" screenshot)
+        # GOOGLE SOURCES
         if response.candidates and response.candidates[0].grounding_metadata:
             metadata = response.candidates[0].grounding_metadata
             if metadata.grounding_chunks:
                 unique_links = set()
-                sources_text = "\n\n**Check these out:**"
+                sources_text = "\n\n**Sources:**"
                 has_sources = False
                 for chunk in metadata.grounding_chunks:
                     if chunk.web and chunk.web.uri:
