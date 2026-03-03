@@ -11,7 +11,6 @@ from memory import get_user_profile, update_user_fact
 from image_tools import get_media_link
 from web_tools import search_video_link
 from finance_tools import get_stock_price
-from research import perform_deep_research
 
 # Load environment variables
 load_dotenv()
@@ -212,16 +211,7 @@ async def get_ai_response(conversation_history, user_id):
                 logger.error(f"Memory save failed for user {user_id}: {e}")
             final_text = final_text.replace("[MEMORY SAVED]", "")
 
-        # 7. RESEARCH — Hybrid model routing via research.py (async)
-        research_matches = list(re.finditer(r'\[RESEARCH: (.*?)\]', final_text, re.IGNORECASE))
-        if research_matches:
-            for m in research_matches:
-                topic = m.group(1)
-                final_text = final_text.replace(m.group(0), "").strip()
-                report = await perform_deep_research(topic)
-                final_text += f"\n\n{report}"
-
-        # 8. PARSERS — Improvement #2: handle ALL occurrences of each tag
+        # 7. PARSERS — Improvement #2: handle ALL occurrences of each tag
 
         # STOCKS
         def _handle_stock(symbol):
@@ -257,7 +247,7 @@ async def get_ai_response(conversation_history, user_id):
         final_text, vid_extra = _process_all_tags(r'\[VIDEO: (.*?)\]', final_text, _handle_video)
         final_text += vid_extra
 
-        # 9. CLEAN UP LINKS
+        # 8. CLEAN UP LINKS
         # Improvement #5: keep markdown links intact for web UIs; only strip for
         # plain-text channels. Default to keeping them. Set STRIP_MD_LINKS=1 in env
         # (e.g., for WhatsApp) to reduce to bare URLs.
